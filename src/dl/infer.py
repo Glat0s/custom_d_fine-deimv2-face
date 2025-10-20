@@ -169,6 +169,8 @@ def main(cfg: DictConfig):
         conf_thresh=cfg.train.conf_thresh,
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
+        keep_ratio=cfg.train.keep_ratio,
+        cfg=cfg,
     )
 
     folder_path = Path(str(cfg.train.path_to_test_data))

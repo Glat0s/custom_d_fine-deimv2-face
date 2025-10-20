@@ -13,8 +13,21 @@ import pandas as pd
 import torch
 import wandb
 from albumentations.core.transforms_interface import DualTransform
+from omegaconf import DictConfig
 from loguru import logger
 from tabulate import tabulate
+
+
+def get_model_builder(cfg: DictConfig):
+    """Selects the model builder based on the criterion specified in the config."""
+    if 'DEIMCriterion' in cfg.train:
+        logger.info("DEIMv2 model and criterion selected.")
+        from src.d_fine.deim import build_model
+        return build_model
+    else:
+        logger.info("D-FINE model and criterion selected.")
+        from src.d_fine.dfine import build_model
+        return build_model
 
 
 def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
@@ -37,7 +50,7 @@ def seed_worker(worker_id):  # noqa
     random.seed(worker_seed)
 
 
-def wandb_logger(loss, metrics: Dict[str, float], epoch, mode: str) -> None:
+def wandb_logger(loss, metrics: Dict[str, float], epoch: int, mode: str) -> None:
     log_data = {"epoch": epoch}
     if loss:
         log_data[f"{mode}/loss/"] = loss

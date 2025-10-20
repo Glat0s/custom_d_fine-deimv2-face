@@ -1,5 +1,4 @@
 from pathlib import Path
-
 import torch.nn as nn
 import torch.optim as optim
 
@@ -76,42 +75,13 @@ def build_loss(model_name, num_classes, label_smoothing):
     )
     return loss_fn
 
-
-def build_optimizer(model, lr, backbone_lr, betas, weight_decay, base_lr):
-    backbone_exclude_norm = []
-    backbone_norm = []
-    encdec_norm_bias = []
-    rest = []
-
-    for name, param in model.named_parameters():
-        # Group 1 and 2: "backbone" in name
-        if "backbone" in name:
-            if "norm" in name or "bn" in name:
-                # Group 2: backbone + norm/bn
-                backbone_norm.append(param)
-            else:
-                # Group 1: backbone but not norm/bn
-                backbone_exclude_norm.append(param)
-
-        # Group 3: "encoder" or "decoder" plus "norm"/"bn"/"bias"
-        elif ("encoder" in name or "decoder" in name) and (
-            "norm" in name or "bn" in name or "bias" in name
-        ):
-            encdec_norm_bias.append(param)
-
-        else:
-            rest.append(param)
-
-    group1 = {"params": backbone_exclude_norm, "lr": backbone_lr, "initial_lr": backbone_lr}
-    group2 = {
-        "params": backbone_norm,
-        "lr": backbone_lr,
-        "weight_decay": 0.0,
-        "initial_lr": backbone_lr,
-    }
-    group3 = {"params": encdec_norm_bias, "weight_decay": 0.0, "lr": base_lr, "initial_lr": base_lr}
-    group4 = {"params": rest, "lr": base_lr, "initial_lr": base_lr}
-
-    param_groups = [group1, group2, group3, group4]
-
-    return optim.AdamW(param_groups, lr=lr, betas=betas, weight_decay=weight_decay)
+def build_optimizer(model, optimizer_cfg):
+    """
+    Builds a simple AdamW optimizer for the D-FINE model.
+    """
+    return optim.AdamW(
+        model.parameters(),
+        lr=optimizer_cfg["lr"],
+        betas=optimizer_cfg.get("betas", [0.9, 0.999]),
+        weight_decay=optimizer_cfg.get("weight_decay", 0.0001),
+    )

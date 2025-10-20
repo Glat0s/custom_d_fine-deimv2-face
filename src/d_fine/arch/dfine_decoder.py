@@ -18,13 +18,19 @@ import torch.nn.functional as F
 import torch.nn.init as init
 
 from .utils import (
+    distance2bbox,
+    weighting_function,
+)
+
+from ..utils import (
     bias_init_with_prob,
     deformable_attention_core_func_v2,
-    distance2bbox,
     get_activation,
-    get_contrastive_denoising_training_group,
     inverse_sigmoid,
-    weighting_function,
+)
+
+from ..denoising import (
+    get_contrastive_denoising_training_group,
 )
 
 __all__ = ["DFINETransformer"]
@@ -296,11 +302,11 @@ class Integral(nn.Module):
 
 
 class LQE(nn.Module):
-    def __init__(self, k, hidden_dim, num_layers, reg_max):
+    def __init__(self, k, hidden_dim, num_layers, reg_max, act="relu"):
         super(LQE, self).__init__()
         self.k = k
         self.reg_max = reg_max
-        self.reg_conf = MLP(4 * (k + 1), hidden_dim, 1, num_layers)
+        self.reg_conf = MLP(4 * (k + 1), hidden_dim, 1, num_layers, act=act)
         init.constant_(self.reg_conf.layers[-1].bias, 0)
         init.constant_(self.reg_conf.layers[-1].weight, 0)
 

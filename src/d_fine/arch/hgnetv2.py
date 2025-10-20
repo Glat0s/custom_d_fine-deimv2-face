@@ -12,7 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .common import FrozenBatchNorm2d
+from .common import FrozenBatchNorm2d, get_activation
+from .. import dist_utils
 
 # Constants for initialization
 kaiming_normal_ = nn.init.kaiming_normal_
@@ -43,6 +44,7 @@ class ConvBNAct(nn.Module):
         padding="",
         use_act=True,
         use_lab=False,
+        act="relu",
     ):
         super().__init__()
         self.use_act = use_act
@@ -64,7 +66,7 @@ class ConvBNAct(nn.Module):
             )
         self.bn = nn.BatchNorm2d(out_chs)
         if self.use_act:
-            self.act = nn.ReLU()
+            self.act = get_activation(act)
         else:
             self.act = nn.Identity()
         if self.use_act and self.use_lab:
@@ -88,6 +90,7 @@ class LightConvBNAct(nn.Module):
         kernel_size,
         groups=1,
         use_lab=False,
+        act="relu",
     ):
         super().__init__()
         self.conv1 = ConvBNAct(
@@ -96,6 +99,7 @@ class LightConvBNAct(nn.Module):
             kernel_size=1,
             use_act=False,
             use_lab=use_lab,
+            act=act,
         )
         self.conv2 = ConvBNAct(
             out_chs,
@@ -104,6 +108,7 @@ class LightConvBNAct(nn.Module):
             groups=out_chs,
             use_act=True,
             use_lab=use_lab,
+            act=act,
         )
 
     def forward(self, x):
@@ -114,7 +119,7 @@ class LightConvBNAct(nn.Module):
 
 class StemBlock(nn.Module):
     # for HGNetv2
-    def __init__(self, in_chs, mid_chs, out_chs, use_lab=False):
+    def __init__(self, in_chs, mid_chs, out_chs, use_lab=False, act="relu"):
         super().__init__()
         self.stem1 = ConvBNAct(
             in_chs,
@@ -122,6 +127,7 @@ class StemBlock(nn.Module):
             kernel_size=3,
             stride=2,
             use_lab=use_lab,
+            act=act,
         )
         self.stem2a = ConvBNAct(
             mid_chs,
@@ -129,6 +135,7 @@ class StemBlock(nn.Module):
             kernel_size=2,
             stride=1,
             use_lab=use_lab,
+            act=act,
         )
         self.stem2b = ConvBNAct(
             mid_chs // 2,
@@ -136,6 +143,7 @@ class StemBlock(nn.Module):
             kernel_size=2,
             stride=1,
             use_lab=use_lab,
+            act=act,
         )
         self.stem3 = ConvBNAct(
             mid_chs * 2,
@@ -143,6 +151,7 @@ class StemBlock(nn.Module):
             kernel_size=3,
             stride=2,
             use_lab=use_lab,
+            act=act,
         )
         self.stem4 = ConvBNAct(
             mid_chs,
@@ -150,6 +159,7 @@ class StemBlock(nn.Module):
             kernel_size=1,
             stride=1,
             use_lab=use_lab,
+            act=act,
         )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=1, ceil_mode=True)
 
@@ -199,6 +209,7 @@ class HG_Block(nn.Module):
         use_lab=False,
         agg="ese",
         drop_path=0.0,
+        act="relu",
     ):
         super().__init__()
         self.residual = residual
@@ -212,6 +223,7 @@ class HG_Block(nn.Module):
                         mid_chs,
                         kernel_size=kernel_size,
                         use_lab=use_lab,
+                        act=act,
                     )
                 )
             else:
@@ -222,6 +234,7 @@ class HG_Block(nn.Module):
                         kernel_size=kernel_size,
                         stride=1,
                         use_lab=use_lab,
+                        act=act,
                     )
                 )
 
@@ -234,6 +247,7 @@ class HG_Block(nn.Module):
                 kernel_size=1,
                 stride=1,
                 use_lab=use_lab,
+                act=act,
             )
             aggregation_excitation_conv = ConvBNAct(
                 out_chs // 2,
@@ -241,6 +255,7 @@ class HG_Block(nn.Module):
                 kernel_size=1,
                 stride=1,
                 use_lab=use_lab,
+                act=act,
             )
             self.aggregation = nn.Sequential(
                 aggregation_squeeze_conv,
@@ -253,6 +268,7 @@ class HG_Block(nn.Module):
                 kernel_size=1,
                 stride=1,
                 use_lab=use_lab,
+                act=act,
             )
             att = EseModule(out_chs)
             self.aggregation = nn.Sequential(
@@ -289,6 +305,7 @@ class HG_Stage(nn.Module):
         use_lab=False,
         agg="se",
         drop_path=0.0,
+        act="relu",
     ):
         super().__init__()
         self.downsample = downsample
@@ -301,6 +318,7 @@ class HG_Stage(nn.Module):
                 groups=in_chs,
                 use_act=False,
                 use_lab=use_lab,
+                act=act,
             )
         else:
             self.downsample = nn.Identity()
@@ -319,6 +337,7 @@ class HG_Stage(nn.Module):
                     use_lab=use_lab,
                     agg=agg,
                     drop_path=drop_path[i] if isinstance(drop_path, (list, tuple)) else drop_path,
+                    act=act,
                 )
             )
         self.blocks = nn.Sequential(*blocks_list)
@@ -342,6 +361,36 @@ class HGNetv2(nn.Module):
     """
 
     arch_configs = {
+        "Atto": {  # only 3 stages
+            "stem_channels": [3, 16, 16],
+            "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
+                "stage1": [16, 16, 64, 1, False, False, 3, 3],
+                "stage2": [64, 32, 256, 1, True, False, 3, 3],
+                "stage3": [256, 64, 256, 1, True, True, 3, 3],
+            },
+            "url": "https://github.com/Peterande/storage/releases/download/dfinev1.0/PPHGNetV2_B0_stage1.pth",
+        },
+        "Femto": {  # only 3 stages
+            "stem_channels": [3, 16, 16],
+            "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
+                "stage1": [16, 16, 64, 1, False, False, 3, 3],
+                "stage2": [64, 32, 256, 1, True, False, 3, 3],
+                "stage3": [256, 64, 512, 1, True, True, 5, 3],
+            },
+            "url": "https://github.com/Peterande/storage/releases/download/dfinev1.0/PPHGNetV2_B0_stage1.pth",
+        },
+        "Pico": {  # only 3 stages
+            "stem_channels": [3, 16, 16],
+            "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
+                "stage1": [16, 16, 64, 1, False, False, 3, 3],
+                "stage2": [64, 32, 256, 1, True, False, 3, 3],
+                "stage3": [256, 64, 512, 2, True, True, 5, 3],
+            },
+            "url": "https://github.com/Peterande/storage/releases/download/dfinev1.0/PPHGNetV2_B0_stage1.pth",
+        },
         "B0": {
             "stem_channels": [3, 16, 16],
             "stage_config": {
@@ -431,10 +480,12 @@ class HGNetv2(nn.Module):
         freeze_norm=True,
         pretrained=True,
         local_model_dir="weight/hgnetv2/",
+        act="relu",
     ):
         super().__init__()
         self.use_lab = use_lab
         self.return_idx = return_idx
+        self.act = act
 
         stem_channels = self.arch_configs[name]["stem_channels"]
         stage_config = self.arch_configs[name]["stage_config"]
@@ -449,6 +500,7 @@ class HGNetv2(nn.Module):
             mid_chs=stem_channels[1],
             out_chs=stem_channels[2],
             use_lab=use_lab,
+            act=self.act,
         )
 
         # stages
@@ -475,6 +527,7 @@ class HGNetv2(nn.Module):
                     light_block,
                     kernel_size,
                     use_lab,
+                    act=self.act,
                 )
             )
 
@@ -488,61 +541,72 @@ class HGNetv2(nn.Module):
             self._freeze_norm(self)
 
         if pretrained:
-            RED, GREEN, RESET = "\033[91m", "\033[92m", "\033[0m"
-            try:
-                model_path = local_model_dir + "PPHGNetV2_" + name + "_stage1.pth"
-                if os.path.exists(model_path):
-                    state = torch.load(model_path, map_location="cpu")
-                    print(f"Loaded stage1 {name} HGNetV2 from local file.")
+            self._load_pretrained_weights(name, local_model_dir, download_url)
+
+    @staticmethod
+    def load_partial_state_dict(model, state_dict):
+        model_dict = model.state_dict()
+        filtered_dict = {
+            k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape
+        }
+        model_dict.update(filtered_dict)
+        model.load_state_dict(model_dict, strict=False)
+        missing = set(model_dict.keys()) - set(filtered_dict.keys())
+        unexpected = set(state_dict.keys()) - set(filtered_dict.keys())
+        logging.info(f"Missing keys: {missing}")
+        logging.info(f"Unexpected keys: {unexpected}")
+
+    def _load_pretrained_weights(self, name, local_model_dir, download_url):
+        RED, GREEN, RESET = "\033[91m", "\033[92m", "\033[0m"
+        try:
+            model_name_for_path = "B0" if name in ["Atto", "Femto", "Pico"] else name
+            model_path = local_model_dir + "PPHGNetV2_" + model_name_for_path + "_stage1.pth"
+
+            if os.path.exists(model_path):
+                state = torch.load(model_path, map_location="cpu")
+                logging.info(f"Loaded stage1 {name} HGNetV2 from local file.")
+            else:
+                if dist_utils.get_rank() == 0:
+                    logging.info(
+                        GREEN
+                        + "Pretrained HGNetV2 not found locally. Downloading... "
+                        + f"Please check network or download manually from {download_url} to {local_model_dir}."
+                        + RESET
+                    )
+                    state = torch.hub.load_state_dict_from_url(
+                        download_url, map_location="cpu", model_dir=local_model_dir
+                    )
+                    dist_utils.barrier()
                 else:
-                    # If the file doesn't exist locally, download from the URL
-                    if torch.distributed.get_rank() == 0:
-                        print(
-                            GREEN
-                            + "If the pretrained HGNetV2 can't be downloaded automatically. Please check your network connection."
-                            + RESET
-                        )
-                        print(
-                            GREEN
-                            + "Please check your network connection. Or download the model manually from "
-                            + RESET
-                            + f"{download_url}"
-                            + GREEN
-                            + " to "
-                            + RESET
-                            + f"{local_model_dir}."
-                            + RESET
-                        )
-                        state = torch.hub.load_state_dict_from_url(
-                            download_url, map_location="cpu", model_dir=local_model_dir
-                        )
-                        torch.distributed.barrier()
-                    else:
-                        torch.distributed.barrier()
-                        state = torch.load(local_model_dir)
+                    dist_utils.barrier()
+                    state = torch.load(model_path, map_location="cpu")
+                logging.info(f"Loaded stage1 {name} HGNetV2 from URL.")
 
-                    print(f"Loaded stage1 {name} HGNetV2 from URL.")
-
+            if name == "Atto":
+                self.load_partial_state_dict(self, state)
+            elif name in ["Femto", "Pico"]:
+                missing, unexpected = self.load_state_dict(state, strict=False)
+                logging.info(f"Missing keys: {missing}")
+                logging.info(f"Unexpected keys: {unexpected}")
+            else:
                 self.load_state_dict(state)
 
-            except (Exception, KeyboardInterrupt) as e:
-                if torch.distributed.get_rank() == 0:
-                    print(f"{str(e)}")
-                    logging.error(
-                        RED + "CRITICAL WARNING: Failed to load pretrained HGNetV2 model" + RESET
-                    )
-                    logging.error(
-                        GREEN
-                        + "Please check your network connection. Or download the model manually from "
-                        + RESET
-                        + f"{download_url}"
-                        + GREEN
-                        + " to "
-                        + RESET
-                        + f"{local_model_dir}."
-                        + RESET
-                    )
-                exit()
+        except (Exception, KeyboardInterrupt) as e:
+            if dist_utils.get_rank() == 0:
+                logging.error(f"{str(e)}")
+                logging.error(RED + "CRITICAL WARNING: Failed to load pretrained HGNetV2 model" + RESET)
+                logging.error(
+                    GREEN
+                    + "Please check network or download manually from "
+                    + RESET
+                    + f"{download_url}"
+                    + GREEN
+                    + " to "
+                    + RESET
+                    + f"{local_model_dir}."
+                    + RESET
+                )
+            exit()
 
     def _freeze_norm(self, m: nn.Module):
         if isinstance(m, nn.BatchNorm2d):

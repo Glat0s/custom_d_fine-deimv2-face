@@ -1,4 +1,3 @@
-import time
 from typing import Dict, List, Tuple
 
 import cv2
@@ -7,11 +6,19 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from numpy.typing import NDArray
+from omegaconf import DictConfig
 from torch.amp import autocast
 from torchvision.ops import nms
 
-from src.d_fine.dfine import build_model
-
+def get_model_builder(cfg: DictConfig):
+    if 'DEIMCriterion' in cfg.train:
+        logger.info("DEIMv2 build_model selected for Torch inference.")
+        from src.d_fine.deim import build_model
+        return build_model
+    else:
+        logger.info("D-FINE build_model selected for Torch inference.")
+        from src.d_fine.dfine import build_model
+        return build_model
 
 class Torch_model:
     def __init__(
@@ -26,6 +33,7 @@ class Torch_model:
         half: bool = False,
         keep_ratio: bool = False,
         use_nms: bool = False,
+        cfg: DictConfig = None,
         device: str = None,
     ):
         self.input_size = (input_height, input_width)
@@ -38,6 +46,7 @@ class Torch_model:
         self.use_nms = use_nms
         self.channels = 3
         self.debug_mode = False
+        self.cfg = cfg
 
         if isinstance(conf_thresh, float):
             self.conf_threshs = [conf_thresh] * self.n_outputs
@@ -63,11 +72,27 @@ class Torch_model:
         self._test_pred()
 
     def _load_model(self):
-        self.model = build_model(self.model_name, self.n_outputs, self.device, img_size=None)
+        build_model = get_model_builder(self.cfg)
+
+        # Pass specific configs only if it's the DEIMv2 builder
+        if 'DEIMCriterion' in self.cfg.train:
+            self.model = build_model(
+                self.model_name, self.n_outputs, self.device,
+                img_size=None,
+                deim_transformer_cfg=self.cfg.train.get('DEIMTransformer'),
+                hybrid_encoder_cfg=self.cfg.train.get('HybridEncoder'),
+                lite_encoder_cfg=self.cfg.train.get('LiteEncoder')
+            )
+        else:
+            self.model = build_model(
+                self.model_name, self.n_outputs, self.device, img_size=None
+            )
+
         self.model.load_state_dict(
             torch.load(self.model_path, weights_only=True, map_location=torch.device("cpu")),
             strict=False,
         )
+        self.model.deploy()
         self.model.eval()
         self.model.to(self.device)
 
@@ -200,13 +225,7 @@ class Torch_model:
                 processed_sizes.append(
                     (processed_inputs[idx].shape[1], processed_inputs[idx].shape[2])
                 )
-
-        tensor = torch.from_numpy(processed_inputs)  # no copying
-        if self.device.type == "cuda":
-            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
-        else:
-            tensor = tensor.to(self.device)
-        return tensor, processed_sizes, original_sizes
+        return torch.tensor(processed_inputs).to(self.device), processed_sizes, original_sizes
 
     @torch.no_grad()
     def _predict(self, inputs) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:

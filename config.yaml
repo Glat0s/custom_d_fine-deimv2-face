@@ -1,18 +1,18 @@
-project_name: vis_drone # for wandb
-exp_name: baseline # experiment name
+project_name: face_detection # for wandb
+exp_name: deimv2 # experiment name
 
 exp: ${exp_name}_${now_dir}
 
-model_name: s # model size (n, s, m, l, x)
+model_name: l # model size (n, s, m, l, x)
 
 train:
   ### Paths ###
-  root: /home/argo/Desktop/Projects/vis_drone # project root with dataset and outputs
+  root: dataset/face-detection # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
   pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
 
-  data_path: ${train.root}/data/dataset # path to dataset
-  path_to_test_data: ${train.root}/VisDrone2019-DET-test-dev/images  # path to test set, used in infer script
+  data_path: ${train.root}/dataset # path to dataset
+  path_to_test_data: ${train.root}/test/images  # path to test set, used in infer script
   path_to_save: ${train.root}/output/models/${exp} # where to save output
 
   debug_img_path: ${train.root}/output/debug_images
@@ -21,20 +21,42 @@ train:
   infer_path: ${train.root}/output/infer
 
   ### Configs ###
-  use_wandb: True
+  use_wandb: False
   device: cuda
   label_to_name: # dataset's classes
-    0: pedestrian
-    1: people
-    2: bicycle
-    3: car
-    4: van
-    5: truck
-    6: tricycle
-    7: awning-tricycle
-    8: bus
-    9: motor
-  use_one_class: False
+    0: face
+
+  use_one_class: True
+
+  ### DEIMv2 Specific Configs ### (MOVED HERE)
+  HybridEncoder:
+    version: deim
+    fuse_op: sum
+    csp_type: csp2
+
+  DEIMTransformer:
+    activation: silu
+    mlp_act: silu
+    # base_size_repeat: 4 # MOVED from here
+    use_gateway: True
+    share_bbox_head: False
+    share_score_head: False
+  
+  DEIMCriterion:
+    weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+    losses: ['mal', 'boxes', 'local']
+    gamma: 1.5
+    alpha: 0.75
+    reg_max: 32
+    use_uni_set: True # Use a union of matched indices for box/local losses
+    matcher:
+      change_matcher: True
+      iou_order_alpha: 4.0
+      matcher_change_epoch: 45 # Epoch to switch matcher behavior
+
+  ### Dataloader ###
+  dataloader:
+    base_size_repeat: 4 # configures multiscale training behaviour
 
   img_size: [640, 640] # (h, w)
   keep_ratio: False # image aspect ratio, if True - image will be padded
@@ -46,8 +68,8 @@ train:
 
   batch_size: 8 # physical, should fit on the device
   b_accum_steps: 1 # grad accumulation (n * bs)
-  epochs: 55
-  early_stopping: 0 # 0 - no early stopping
+  epochs: 58 # Total epochs
+  early_stopping: 10 # 0 - no early stopping
   ignore_background_epochs: 0 # background images are not used for N epochs in train set
   num_workers: 12
 
@@ -57,31 +79,74 @@ train:
 
   ### EMA ###
   use_ema: True # use exponential moving average model
-  ema_momentum: 0.9998
+  ema_momentum: 0.9999
+  ema_restart_decay: 0.9999
 
-  ### Optimizer and Scheduler ###
-  base_lr: ${train.lrs.${model_name}.base_lr}
-  backbone_lr: ${train.lrs.${model_name}.backbone_lr}
-  cycler_pct_start: 0.1
-  weight_decay: 0.000125
-  betas: [0.9, 0.999]
+  ### Optimizer ###
+  optimizer:
+    type: AdamW
+    lr: ${train.lrs.${model_name}.base_lr} # Default learning rate
+    betas: [0.9, 0.999]
+    weight_decay: 0.000125
+    params:
+      - params: '^(?=.*backbone)(?!.*(?:norm|bn)).*$'
+        lr: ${train.lrs.${model_name}.backbone_lr}
+      - params: '^(?=.*backbone)(?=.*(?:norm|bn)).*$'
+        lr: ${train.lrs.${model_name}.backbone_lr}
+        weight_decay: 0.0
+      - params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+        weight_decay: 0.0
+  
+  ### Scheduler ###
+  lr_scheduler:
+    type: flatcosine # 'onecycle' or 'flatcosine'
+    # For OneCycleLR
+    cycler_pct_start: 0.1
+    # For FlatCosineLRScheduler
+    lr_gamma: 0.5
+    warmup_iter: 2000
+    flat_epochs: 29
+    no_aug_epochs: 8  # epochs at the end without heavy augmentations
+
   label_smoothing: 0.0
-
+  
   ### Augs ###
-  mosaic_augs:
-    mosaic_prob: 0.8
-    no_mosaic_epochs: 5
-    mosaic_scale: [0.5, 1.5]
-    degrees: 0.0 # not recommended if bbox precision is critical
-    translate: 0.2
-    shear: 2.0
+  # Augmentation policy based on DEIMv2
+  # [start_strong_augs_epoch, start_flat_lr_epoch, stop_strong_augs_epoch]
+  aug_policy:
+    epoch: [4, 29, 50]
+    ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
 
+  mixup_augs:
+    mixup_prob: 0.5
+    mixup_epochs: [4, 29]
+
+  copyblend_augs:
+    copyblend_prob: 0.5
+    copyblend_type: blend
+    copyblend_epochs: [4, 50]
+    area_threshold: 100
+    num_objects: 3
+    with_expand: True
+    random_num_objects: True # if true, will use random number of objects from 1 to num_objects
+    expand_ratios: [0.1, 0.25]
+
+  mosaic_augs:
+    mosaic_prob: 0.5 # Probability to apply mosaic within the policy range
+    mosaic_scale: [0.5, 1.5]
+    degrees: 0.0
+    translate: 0.1
+    shear: 0.0
+  
   augs:
-    rotation_degree: 10 # maximum +- rotation
-    rotation_p: 0.0 # probability of the rotation (with above degree)
-    multiscale_prob: 0.0
+    multiscale_prob: 0.5
+    photometric_distort_p: 0.5
+    iou_crop_p: 0.8
+    zoom_out_p: 0.5
+    rotation_degree: 10
+    rotation_p: 0.0
     rotate_90: 0.05
-    left_right_flip: 0.3
+    left_right_flip: 0.5
     up_down_flip: 0.0
     to_gray: 0.01
     blur: 0.01
@@ -100,18 +165,17 @@ train:
       backbone_lr: 0.0004
       base_lr: 0.0008
     s:
-      backbone_lr: 0.00006  # can setup up to 0.0002
-      base_lr: 0.00025  # 0.0004
+      backbone_lr: 0.00006
+      base_lr: 0.00025
     m:
-      backbone_lr: 0.00002  # 0.000025
-      base_lr: 0.00015  # 0.00025
+      backbone_lr: 0.00002
+      base_lr: 0.00015
     l:
-      backbone_lr: 0.00000625 # 0.0000125
-      base_lr: 0.000125 # 0.00025
+      backbone_lr: 0.00000625
+      base_lr: 0.000125
     x:
-      backbone_lr: 0.0000015  # 0.0000025
-      base_lr: 0.0001  # 0.00025
-
+      backbone_lr: 0.0000015
+      base_lr: 0.0001
 
 split:
   ignore_negatives: False # only use images with labels
@@ -136,8 +200,8 @@ infer:
 ### service ###
 defaults:
   - _self_
-  - override hydra/hydra_logging: disabled
-  - override hydra/job_logging: disabled
+#  - override hydra/hydra_logging: disabled
+#  - override hydra/job_logging: disabled
 
 hydra:
   output_subdir: null

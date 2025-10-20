@@ -11,21 +11,43 @@ from omegaconf import DictConfig
 from onnxconverter_common import float16
 from torch import nn
 
-from src.d_fine.dfine import build_model
 from src.dl.utils import get_latest_experiment_name
 
 INPUT_NAME = "input"
 OUTPUT_NAMES = ["logits", "boxes"]
 
 
+def get_model_builder(cfg: DictConfig):
+    if 'DEIMCriterion' in cfg.train:
+        logger.info("DEIMv2 model builder selected for export.")
+        from src.d_fine.deim import build_model
+        return build_model
+    else:
+        logger.info("D-FINE model builder selected for export.")
+        from src.d_fine.dfine import build_model
+        return build_model
+
 def prepare_model(cfg, device):
-    model = build_model(
-        cfg.model_name, len(cfg.train.label_to_name), device, img_size=cfg.train.img_size
-    )
+    build_model = get_model_builder(cfg)
+
+    # Pass specific configs only if it's the DEIMv2 builder
+    if 'DEIMCriterion' in cfg.train:
+        model = build_model(
+            cfg.model_name, len(cfg.train.label_to_name), device,
+            img_size=cfg.train.img_size,
+            deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
+            hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
+            lite_encoder_cfg=cfg.train.get('LiteEncoder')
+        )
+    else:
+        model = build_model(
+            cfg.model_name, len(cfg.train.label_to_name), device, img_size=cfg.train.img_size
+        )
+
     model.load_state_dict(torch.load(Path(cfg.train.path_to_save) / "model.pt", weights_only=True))
+    model.deploy()
     model.eval()
     return model
-
 
 def add_suffix(output_path, dynamic_input: bool, half: bool):
     if dynamic_input:

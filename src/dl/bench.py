@@ -172,6 +172,7 @@ def main(cfg: DictConfig):
         rect=cfg.export.dynamic_input,
         half=cfg.export.half,
         keep_ratio=cfg.train.keep_ratio,
+        cfg=cfg,
     )
 
     trt_model = TRT_model(

@@ -9,7 +9,10 @@ train:
   ### Paths ###
   root: dataset/face-detection # project root with dataset and outputs
   pretrained_dataset: coco # coco, obj2coco
-  pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
+  
+  # train from scratch -> null
+  #pretrained_model_path: pretrained/dfine_${model_name}_${train.pretrained_dataset}.pth # dfine_m_obj2coco.pth
+  pretrained_model_path: null
 
   data_path: ${train.root}/dataset # path to dataset
   path_to_test_data: ${train.root}/test/images  # path to test set, used in infer script
@@ -37,7 +40,7 @@ train:
   DEIMTransformer:
     activation: silu
     mlp_act: silu
-    # base_size_repeat: 4 # MOVED from here
+    # base_size_repeat: 4
     use_gateway: True
     share_bbox_head: False
     share_score_head: False
@@ -200,10 +203,10 @@ split:
   val_split: 0.15 # test_split = 1 - train_split - val_split
 
 
-export: # TensorRT must be done on the inference device
-  half: False # torch, tensorrt
-  max_batch_size: 1 # torch, tensorrt
-  dynamic_input: False # torch, openvino cpu only
+export:
+  half: False
+  max_batch_size: 1
+  dynamic_input: False
 
 
 infer:

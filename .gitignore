@@ -3,3 +3,5 @@ __pycache__/
 dataset/
 pretrained/
 .venv/
+*.log
+ckpts/

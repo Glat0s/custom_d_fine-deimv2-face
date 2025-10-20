@@ -1,3 +1,5 @@
+# src/d_fine/deim.py
+
 from pathlib import Path
 import re
 from copy import deepcopy
@@ -5,13 +7,13 @@ import inspect
 
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import OneCycleLR
 from omegaconf import OmegaConf
 
 # Import new DEIM components
 from src.d_fine.deim_criterion import DEIMCriterion
-from .arch.deim_decoder import DEIMTransformer 
+from .arch.deim_decoder import DEIMTransformer
 from .arch.hgnetv2 import HGNetv2
+from .arch.dinov3_adapter import DINOv3STAs
 from .arch.hybrid_encoder import HybridEncoder
 from .arch.lite_encoder import LiteEncoder
 from .configs import models
@@ -53,28 +55,40 @@ class DEIM(nn.Module):
         return self
 
 
-def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None, deim_transformer_cfg=None, hybrid_encoder_cfg=None, lite_encoder_cfg=None):
+def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None, deim_transformer_cfg=None, hybrid_encoder_cfg=None, lite_encoder_cfg=None, dinov3_stas_cfg=None):
     model_cfg = deepcopy(models[model_name])
     
-    # Merge DEIMv2 specific configs if provided
+    # Merge any overrides from the main config.yaml
     if deim_transformer_cfg:
         model_cfg["DEIMTransformer"].update(deim_transformer_cfg)
+    if hybrid_encoder_cfg:
+        model_cfg["HybridEncoder"].update(hybrid_encoder_cfg)
+    if lite_encoder_cfg:
+        model_cfg["LiteEncoder"].update(lite_encoder_cfg)
+    if dinov3_stas_cfg:
+        model_cfg["DINOv3STAs"].update(dinov3_stas_cfg)
 
-    # Determine which encoder to use based on config
-    if "LiteEncoder" in model_cfg or lite_encoder_cfg is not None:
-         if "LiteEncoder" not in model_cfg: model_cfg["LiteEncoder"] = {}
-         if lite_encoder_cfg: model_cfg["LiteEncoder"].update(lite_encoder_cfg)
+    # Backbone selection logic
+    if "DINOv3STAs" in model_cfg and model_name in ['s', 'm', 'l', 'x']:
+        print("Building DEIMv2 with DINOv3/ViT backbone.")
+        backbone = DINOv3STAs(**model_cfg["DINOv3STAs"])
+        
+        # Manually update in_channels for HybridEncoder based on DINOv3STAs output
+        hidden_dim = model_cfg["DINOv3STAs"]["hidden_dim"]
+        model_cfg["HybridEncoder"]["in_channels"] = [hidden_dim, hidden_dim, hidden_dim]
+    else:
+        print("Building DEIMv2 with HGNetv2 backbone.")
+        backbone = HGNetv2(**model_cfg["HGNetv2"])
+
+    # Encoder selection logic
+    if "LiteEncoder" in model_cfg:
          model_cfg["LiteEncoder"]["eval_spatial_size"] = img_size
          encoder = LiteEncoder(**model_cfg["LiteEncoder"])
     else:
-        if hybrid_encoder_cfg:
-            model_cfg["HybridEncoder"].update(hybrid_encoder_cfg)
         model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
         encoder = HybridEncoder(**model_cfg["HybridEncoder"])
 
     model_cfg["DEIMTransformer"]["eval_spatial_size"] = img_size
-
-    backbone = HGNetv2(**model_cfg["HGNetv2"])
 
     # Filter decoder kwargs to only include valid arguments for DEIMTransformer
     decoder_args = model_cfg["DEIMTransformer"]
@@ -88,6 +102,7 @@ def build_model(model_name, num_classes, device, img_size=None, pretrained_model
         if not Path(pretrained_model_path).exists():
             raise FileNotFoundError(f"{pretrained_model_path} does not exist")
         model = load_tuning_state(model, str(pretrained_model_path))
+
     return model.to(device)
 
 def build_loss(model_name, num_classes, deim_criterion_cfg):

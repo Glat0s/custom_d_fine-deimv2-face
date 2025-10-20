@@ -54,6 +54,16 @@ train:
       iou_order_alpha: 4.0
       matcher_change_epoch: 45 # Epoch to switch matcher behavior
 
+  ### DINOv3STAs default config
+  DINOv3STAs:
+    name: dinov3_vits16
+    weights_path: ./ckpts/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+    interaction_indexes: [5,8,11]
+    finetune: True
+    conv_inplane: 32
+    hidden_dim: 224
+
+
   ### Dataloader ###
   dataloader:
     base_size_repeat: 4 # configures multiscale training behaviour
@@ -85,17 +95,23 @@ train:
   ### Optimizer ###
   optimizer:
     type: AdamW
-    lr: ${train.lrs.${model_name}.base_lr} # Default learning rate
+    lr: ${train.lrs.${model_name}.base_lr}
     betas: [0.9, 0.999]
     weight_decay: 0.000125
-    params:
-      - params: '^(?=.*backbone)(?!.*(?:norm|bn)).*$'
+    params: 
+      -
+        # DINOv3 params except norm/bias
+        params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'  
         lr: ${train.lrs.${model_name}.backbone_lr}
-      - params: '^(?=.*backbone)(?=.*(?:norm|bn)).*$'
+      -
+        # DINOv3 norm/bias params
+        params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'    
         lr: ${train.lrs.${model_name}.backbone_lr}
-        weight_decay: 0.0
-      - params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
-        weight_decay: 0.0
+        weight_decay: 0.
+      - 
+        # All other norm/bias params (encoder, decoder, etc.)
+        params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+        weight_decay: 0.
   
   ### Scheduler ###
   lr_scheduler:
@@ -171,8 +187,8 @@ train:
       backbone_lr: 0.00002
       base_lr: 0.00015
     l:
-      backbone_lr: 0.00000625
-      base_lr: 0.000125
+      backbone_lr: 0.0000125 # This is the specific LR for dinov3 parameters
+      base_lr: 0.0005   # This is the LR for other parameters
     x:
       backbone_lr: 0.0000015
       base_lr: 0.0001

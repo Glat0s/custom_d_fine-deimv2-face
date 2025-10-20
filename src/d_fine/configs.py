@@ -1,9 +1,19 @@
+from copy import deepcopy
+
 base_cfg = {
     "HGNetv2": {
         "pretrained": False,
         "local_model_dir": "weight/hgnetv2/",
         "freeze_stem_only": True,
         "act": "silu",  # DEIMv2 uses silu
+    },
+    "DINOv3STAs": {
+        "name": "dinov3_vits16",
+        "weights_path": "./ckpts/dinov3_vits16.pth",
+        "interaction_indexes": [5, 8, 11],
+        "finetune": True,
+        "conv_inplane": 32,
+        "hidden_dim": 224,
     },
     "HybridEncoder": {
         "num_encoder_layers": 1,
@@ -114,53 +124,35 @@ sizes_cfg = {
         },
     },
     "s": {
-        "HGNetv2": {"name": "B0", "return_idx": [1, 2, 3], "use_lab": True},
-        "HybridEncoder": {
-            "in_channels": [256, 512, 1024], "hidden_dim": 256,
-            "depth_mult": 0.34, "expansion": 0.5, "version": "dfine", # s-model uses dfine encoder
-        },
-        "DEIMTransformer": {
-            "feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 3,
-            "dim_feedforward": 1024, "num_points": [3, 6, 3],
-        },
+        "DINOv3STAs": { "name": "vit_tiny", "embed_dim": 192, "num_heads": 3, "weights_path": "./ckpts/vitt_distill.pt", "interaction_indexes": [3, 7, 11]},
+        "HybridEncoder": { "hidden_dim": 192, "depth_mult": 0.67, "expansion": 0.34, "dim_feedforward": 512},
+        "DEIMTransformer": {"feat_channels": [192, 192, 192], "hidden_dim": 192, "num_layers": 4, "dim_feedforward": 512, "num_points": [3, 6, 3],},
     },
     "m": {
-        "HGNetv2": {"name": "B2", "return_idx": [1, 2, 3], "use_lab": True},
-        "HybridEncoder": {"in_channels": [384, 768, 1536], "hidden_dim": 256, "depth_mult": 0.67},
-        "DEIMTransformer": {
-            "feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 4,
-            "dim_feedforward": 1024, "num_points": [3, 6, 3],
-        },
+        "DINOv3STAs": { "name": "vit_tinyplus", "embed_dim": 256, "num_heads": 4, "weights_path": "./ckpts/vittplus_distill.pt", "interaction_indexes": [3, 7, 11]},
+        "HybridEncoder": {"hidden_dim": 256, "depth_mult": 1.0, "expansion": 0.67, "dim_feedforward": 512},
+        "DEIMTransformer": {"feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 4, "dim_feedforward": 512, "num_points": [3, 6, 3],},
     },
     "l": {
-        "HGNetv2": {"name": "B4", "return_idx": [1, 2, 3], "freeze_at": 0, "freeze_norm": True, "use_lab": False},
-        "HybridEncoder": {"in_channels": [512, 1024, 2048], "hidden_dim": 256, "dim_feedforward": 1024},
-        "DEIMTransformer": {
-            "feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 6,
-            "dim_feedforward": 2048, "num_points": [3, 6, 3],
-        },
+        "DINOv3STAs": { "name": "dinov3_vits16", "weights_path": "./ckpts/dinov3_vits16.pth", "interaction_indexes": [5, 8, 11], "hidden_dim": 224, "conv_inplane": 32},
+        "HybridEncoder": {"hidden_dim": 224, "dim_feedforward": 896},
+        "DEIMTransformer": {"feat_channels": [224, 224, 224], "hidden_dim": 224, "num_layers": 4, "dim_feedforward": 1792, "num_points": [3, 6, 3],},
     },
     "x": {
-        "HGNetv2": {"name": "B5", "return_idx": [1, 2, 3], "freeze_at": 0, "freeze_norm": True, "use_lab": False},
-        "HybridEncoder": {"in_channels": [512, 1024, 2048], "hidden_dim": 384, "dim_feedforward": 2048},
-        "DEIMTransformer": {
-            "feat_channels": [384, 384, 384], "hidden_dim": 384, "num_layers": 6, "reg_scale": 8,
-            "dim_feedforward": 2048, "num_points": [3, 6, 3],
-        },
+        "DINOv3STAs": { "name": "dinov3_vits16plus", "weights_path": "./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth", "interaction_indexes": [5, 8, 11], "hidden_dim": 256, "conv_inplane": 64},
+        "HybridEncoder": {"hidden_dim": 256, "dim_feedforward": 1024, "expansion": 1.25, "depth_mult": 1.37},
+        "DEIMTransformer": {"feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 6, "dim_feedforward": 2048, "num_points": [3, 6, 3],},
     },
 }
 
 def merge_configs(base, size_specific):
-    # The original file had a special handling for renaming criterion keys.
-    # Since we add both keys to base_cfg, that logic is no longer needed and can be simplified or removed.
-    # For simplicity, let's stick with the original merge logic which works fine.
     result = {**base}
     for key, value in size_specific.items():
         if key in result and isinstance(result[key], dict):
-            result[key] = merge_configs(result[key], value)
+            # Recursively merge dictionaries
+            result[key] = {**result[key], **value}
         else:
             result[key] = value
     return result
 
-
-models = {size: merge_configs(base_cfg, config) for size, config in sizes_cfg.items()}
+models = {size: merge_configs(deepcopy(base_cfg), config) for size, config in sizes_cfg.items()}

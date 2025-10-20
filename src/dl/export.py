@@ -37,7 +37,8 @@ def prepare_model(cfg, device):
             img_size=cfg.train.img_size,
             deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
             hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
-            lite_encoder_cfg=cfg.train.get('LiteEncoder')
+            lite_encoder_cfg=cfg.train.get('LiteEncoder'),
+            dinov3_stas_cfg=cfg.train.get('DINOv3STAs')  # <-- FIX
         )
     else:
         model = build_model(

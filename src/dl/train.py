@@ -96,7 +96,8 @@ class Trainer:
                 pretrained_model_path=cfg.train.pretrained_model_path,
                 deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
                 hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
-                lite_encoder_cfg=cfg.train.get('LiteEncoder')
+                lite_encoder_cfg=cfg.train.get('LiteEncoder'),
+                dinov3_stas_cfg=cfg.train.get('DINOv3STAs')  # <-- FIX
             )
         else:
             self.model = build_model(

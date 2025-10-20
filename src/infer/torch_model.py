@@ -81,7 +81,8 @@ class Torch_model:
                 img_size=None,
                 deim_transformer_cfg=self.cfg.train.get('DEIMTransformer'),
                 hybrid_encoder_cfg=self.cfg.train.get('HybridEncoder'),
-                lite_encoder_cfg=self.cfg.train.get('LiteEncoder')
+                lite_encoder_cfg=self.cfg.train.get('LiteEncoder'),
+                dinov3_stas_cfg=self.cfg.train.get('DINOv3STAs')  # <-- FIX
             )
         else:
             self.model = build_model(

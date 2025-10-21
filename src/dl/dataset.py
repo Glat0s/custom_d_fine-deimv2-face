@@ -226,7 +226,7 @@ class CustomDataset(Dataset):
                                 min_height=self.target_h,
                                 min_width=self.target_w,
                                 border_mode=cv2.BORDER_CONSTANT,
-                                value=0,
+                                value=(0, 0, 0), # <-- Use the correct argument `value` with a tuple for RGB
                             )
                         )
 
@@ -571,19 +571,33 @@ class Loader:
                             alpha = random.uniform(*self.cfg.train.copyblend_augs.expand_ratios)
                             expand_w, expand_h = int(patch_w * alpha), int(patch_h * alpha)
 
-                            x1_src_exp = max(0, x1_src - expand_w)
-                            y1_src_exp = max(0, y1_src - expand_h)
-                            x2_src_exp = min(img_width, x2_src + expand_w)
-                            y2_src_exp = min(img_height, y2_src + expand_h)
+                            # Calculate how much we can actually expand on each side for both source and destination
+                            # This prevents going out of bounds.
+                            src_expand_left = min(x1_src, expand_w)
+                            src_expand_top = min(y1_src, expand_h)
+                            src_expand_right = min(img_width - x2_src, expand_w)
+                            src_expand_bottom = min(img_height - y2_src, expand_h)
 
-                            x1_dst_exp = max(0, x1_dst - expand_w)
-                            y1_dst_exp = max(0, y1_dst - expand_h)
-                            x2_dst_exp = min(img_width, x1_dst + patch_w + expand_w)
-                            y2_dst_exp = min(img_height, y1_dst + patch_h + expand_h)
+                            dst_expand_left = min(x1_dst, expand_w)
+                            dst_expand_top = min(y1_dst, expand_h)
+                            dst_expand_right = min(img_width - (x1_dst + patch_w), expand_w)
+                            dst_expand_bottom = min(img_height - (y1_dst + patch_h), expand_h)
+                            
+                            # Take the minimum possible expansion to ensure slices match
+                            final_expand_left = min(src_expand_left, dst_expand_left)
+                            final_expand_top = min(src_expand_top, dst_expand_top)
+                            final_expand_right = min(src_expand_right, dst_expand_right)
+                            final_expand_bottom = min(src_expand_bottom, dst_expand_bottom)
 
-                            copy_patch_expanded = images[
-                                source_idx, :, y1_src_exp:y2_src_exp, x1_src_exp:x2_src_exp
-                            ]
+                            # Define the final source and destination slices, which are now guaranteed to be the same size
+                            x1_src_exp, y1_src_exp = x1_src - final_expand_left, y1_src - final_expand_top
+                            x2_src_exp, y2_src_exp = x2_src + final_expand_right, y2_src + final_expand_bottom
+
+                            x1_dst_exp, y1_dst_exp = x1_dst - final_expand_left, y1_dst - final_expand_top
+                            x2_dst_exp, y2_dst_exp = x1_dst + patch_w + final_expand_right, y1_dst + patch_h + final_expand_bottom
+                            
+                            copy_patch_expanded = images[source_idx, :, y1_src_exp:y2_src_exp, x1_src_exp:x2_src_exp]
+                            
                             if self.copyblend_cfg.get("copyblend_type") == "blend":
                                 blended_patch = (
                                     updated_images[i, :, y1_dst_exp:y2_dst_exp, x1_dst_exp:x2_dst_exp]
@@ -597,7 +611,7 @@ class Loader:
                                 updated_images[
                                     i, :, y1_dst_exp:y2_dst_exp, x1_dst_exp:x2_dst_exp
                                 ] = copy_patch_expanded
-                        else:
+                        else: # Original non-expanded logic
                             if self.copyblend_cfg.get("copyblend_type") == "blend":
                                 blended_patch = (
                                     updated_images[i, :, y1_dst : y1_dst + patch_h, x1_dst : x1_dst + patch_w]

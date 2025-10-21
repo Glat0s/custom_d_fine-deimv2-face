@@ -81,12 +81,19 @@ def build_model(model_name, num_classes, device, img_size=None, pretrained_model
         backbone = HGNetv2(**model_cfg["HGNetv2"])
 
     # Encoder selection logic
-    if "LiteEncoder" in model_cfg:
-         model_cfg["LiteEncoder"]["eval_spatial_size"] = img_size
-         encoder = LiteEncoder(**model_cfg["LiteEncoder"])
-    else:
+    from .configs import sizes_cfg # Make sure sizes_cfg is imported
+
+    # Encoder selection logic
+    if "LiteEncoder" in sizes_cfg[model_name]:
+        print("Building with LiteEncoder.")
+        model_cfg["LiteEncoder"]["eval_spatial_size"] = img_size
+        encoder = LiteEncoder(**model_cfg["LiteEncoder"])
+    elif "HybridEncoder" in sizes_cfg[model_name]:
+        print("Building with HybridEncoder.")
         model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
         encoder = HybridEncoder(**model_cfg["HybridEncoder"])
+    else:
+        raise ValueError(f"No valid encoder (LiteEncoder or HybridEncoder) specified for model size '{model_name}' in configs.py")
 
     model_cfg["DEIMTransformer"]["eval_spatial_size"] = img_size
 

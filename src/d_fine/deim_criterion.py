@@ -382,9 +382,13 @@ class DEIMCriterion(nn.Module):
 
             for i, aux_outputs in enumerate(outputs['enc_aux_outputs']):
                 for loss in self.losses:
-                    use_uni_set = self.use_uni_set and (loss == 'boxes')
-                    indices_in = indices_go if use_uni_set else cached_indices_enc[i]
-                    num_boxes_in = num_boxes_go if use_uni_set else num_boxes
+                    # For encoder outputs, NEVER use the unified set of indices.
+                    indices_in = cached_indices_enc[i]
+                    num_boxes_in = num_boxes
+                    
+                    if loss in ['local']: # Also skip local loss for encoder
+                        continue
+
                     meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, indices_in)
                     l_dict = self.get_loss(loss, aux_outputs, enc_targets, indices_in, num_boxes_in, **meta)
                     l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}

@@ -273,7 +273,7 @@ class CustomDataset(Dataset):
             image = transformed["image"]
             boxes = (
                 torch.tensor(transformed["bboxes"], dtype=torch.float32)
-                if transformed["bboxes"]
+                if len(transformed["bboxes"]) > 0
                 else torch.zeros((0, 4), dtype=torch.float32)
             )
             labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)

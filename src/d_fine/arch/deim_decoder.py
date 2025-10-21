@@ -335,14 +335,33 @@ class DEIMTransformer(nn.Module):
         return torch.where(valid_mask, anchors, torch.inf), valid_mask
 
     def _get_decoder_input(self, memory, spatial_shapes, denoising_logits=None, denoising_bbox_unact=None):
-        anchors, valid_mask = self._generate_anchors(spatial_shapes, device=memory.device) if self.training or not hasattr(self, 'anchors') else (self.anchors, self.valid_mask)
+        bs = memory.shape[0] # Get the current batch size
+
+        if self.training or not hasattr(self, 'anchors'):
+            anchors, valid_mask = self._generate_anchors(spatial_shapes, device=memory.device)
+        else:
+            # Use pre-computed anchors and move to the correct device
+            anchors = self.anchors.to(memory.device)
+            valid_mask = self.valid_mask.to(memory.device)
+
+        # Ensure anchors and mask are repeated to match the batch size
+        if anchors.shape[0] != bs:
+            anchors = anchors.repeat(bs, 1, 1)
+        if valid_mask.shape[0] != bs:
+            valid_mask = valid_mask.repeat(bs, 1, 1)
+        
         memory = valid_mask.to(memory.dtype) * memory
         enc_outputs_logits = self.enc_score_head(memory)
         
         topk_memory, topk_logits, topk_anchors = self._select_topk(memory, enc_outputs_logits, anchors, self.num_queries)
         enc_topk_bbox_unact = self.enc_bbox_head(topk_memory) + topk_anchors
         
-        enc_topk_bboxes_list, enc_topk_logits_list = [F.sigmoid(enc_topk_bbox_unact)], [topk_logits] if self.training else [], []
+        if self.training:
+            enc_topk_bboxes_list = [F.sigmoid(enc_topk_bbox_unact)]
+            enc_topk_logits_list = [topk_logits]
+        else:
+            enc_topk_bboxes_list = []
+            enc_topk_logits_list = []
         
         content = self.tgt_embed.weight.unsqueeze(0).expand(memory.shape[0], -1, -1) if self.learn_query_content else topk_memory.detach()
         

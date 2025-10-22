@@ -10,15 +10,7 @@ from omegaconf import DictConfig
 from torch.amp import autocast
 from torchvision.ops import nms
 
-def get_model_builder(cfg: DictConfig):
-    if 'DEIMCriterion' in cfg.train:
-        logger.info("DEIMv2 build_model selected for Torch inference.")
-        from src.d_fine.deim import build_model
-        return build_model
-    else:
-        logger.info("D-FINE build_model selected for Torch inference.")
-        from src.d_fine.dfine import build_model
-        return build_model
+from src.dl.utils import get_model_builder
 
 class Torch_model:
     def __init__(
@@ -68,6 +60,9 @@ class Torch_model:
         else:
             self.amp_enabled = False
 
+        self.norm_mean = np.array([0.485, 0.456, 0.406], dtype=self.np_dtype).reshape((3, 1, 1))
+        self.norm_std = np.array([0.229, 0.224, 0.225], dtype=self.np_dtype).reshape((3, 1, 1))
+
         self._load_model()
         self._test_pred()
 
@@ -77,16 +72,18 @@ class Torch_model:
         # Pass specific configs only if it's the DEIMv2 builder
         if 'DEIMCriterion' in self.cfg.train:
             self.model = build_model(
-                self.model_name, self.n_outputs, self.device,
-                img_size=None,
+                model_name=self.model_name,
+                num_classes=self.n_outputs,
+                device=self.device,
+                img_size=self.input_size, # Pass the actual image size
                 deim_transformer_cfg=self.cfg.train.get('DEIMTransformer'),
                 hybrid_encoder_cfg=self.cfg.train.get('HybridEncoder'),
                 lite_encoder_cfg=self.cfg.train.get('LiteEncoder'),
-                dinov3_stas_cfg=self.cfg.train.get('DINOv3STAs')  # <-- FIX
+                dinov3_stas_cfg=self.cfg.train.get('DINOv3STAs')
             )
-        else:
+        else: # Fallback for D-FINE
             self.model = build_model(
-                self.model_name, self.n_outputs, self.device, img_size=None
+                self.model_name, self.n_outputs, self.device, img_size=self.input_size
             )
 
         self.model.load_state_dict(
@@ -197,6 +194,8 @@ class Torch_model:
         img = np.ascontiguousarray(img, dtype=self.np_dtype)
         img /= 255.0
 
+        img = (img - self.norm_mean) / self.norm_std
+
         # save debug image
         if self.debug_mode:
             debug_img = img.reshape([1, *img.shape])
@@ -204,6 +203,7 @@ class Torch_model:
             debug_img = (debug_img * 255.0).astype(np.uint8)  # Convert to uint8
             debug_img = debug_img[:, :, ::-1]  # RGB to BGR for saving
             cv2.imwrite("torch_infer.jpg", debug_img)
+
         return img
 
     def _prepare_inputs(self, inputs):

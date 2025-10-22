@@ -58,7 +58,7 @@ class DEIM(nn.Module):
 def build_model(model_name, num_classes, device, img_size=None, pretrained_model_path=None, deim_transformer_cfg=None, hybrid_encoder_cfg=None, lite_encoder_cfg=None, dinov3_stas_cfg=None):
     model_cfg = deepcopy(models[model_name])
     
-    # Merge any overrides from the main config.yaml
+    # Merge overrides from the main config.yaml into the model-specific config
     if deim_transformer_cfg:
         model_cfg["DEIMTransformer"].update(deim_transformer_cfg)
     if hybrid_encoder_cfg:
@@ -68,39 +68,45 @@ def build_model(model_name, num_classes, device, img_size=None, pretrained_model
     if dinov3_stas_cfg:
         model_cfg["DINOv3STAs"].update(dinov3_stas_cfg)
 
-    # Backbone selection logic
+
     if "DINOv3STAs" in model_cfg and model_name in ['s', 'm', 'l', 'x']:
         print("Building DEIMv2 with DINOv3/ViT backbone.")
-        backbone = DINOv3STAs(**model_cfg["DINOv3STAs"])
+
+        backbone_cfg = model_cfg["DINOv3STAs"]
+
+        backbone = DINOv3STAs(**backbone_cfg)
         
-        # Manually update in_channels for HybridEncoder based on DINOv3STAs output
-        hidden_dim = model_cfg["DINOv3STAs"]["hidden_dim"]
-        model_cfg["HybridEncoder"]["in_channels"] = [hidden_dim, hidden_dim, hidden_dim]
+        # DINOv3STAs uses hidden_dim for all output feature maps
+        encoder_in_channels = [backbone_cfg["hidden_dim"]] * 3
     else:
         print("Building DEIMv2 with HGNetv2 backbone.")
         backbone = HGNetv2(**model_cfg["HGNetv2"])
+        # HGNetv2 has a list of output channels for its return_idx
+        encoder_in_channels = [backbone._out_channels[i] for i in backbone.return_idx]
+        model_cfg["HybridEncoder"]["in_channels"] = encoder_in_channels
 
-    # Encoder selection logic
-    from .configs import sizes_cfg # Make sure sizes_cfg is imported
-
-    # Encoder selection logic
-    if "LiteEncoder" in sizes_cfg[model_name]:
+    if "LiteEncoder" in model_cfg and model_name in ['atto', 'femto', 'pico']:
         print("Building with LiteEncoder.")
-        model_cfg["LiteEncoder"]["eval_spatial_size"] = img_size
-        encoder = LiteEncoder(**model_cfg["LiteEncoder"])
-    elif "HybridEncoder" in sizes_cfg[model_name]:
+        model_cfg["LiteEncoder"]["in_channels"] = [backbone._out_channels[i] for i in backbone.return_idx]
+        encoder_cfg = model_cfg["LiteEncoder"]
+        encoder_cfg["eval_spatial_size"] = img_size
+        encoder = LiteEncoder(**encoder_cfg)
+    elif "HybridEncoder" in model_cfg:
         print("Building with HybridEncoder.")
-        model_cfg["HybridEncoder"]["eval_spatial_size"] = img_size
-        encoder = HybridEncoder(**model_cfg["HybridEncoder"])
+        model_cfg["HybridEncoder"]["in_channels"] = encoder_in_channels
+        encoder_cfg = model_cfg["HybridEncoder"]
+        encoder_cfg["eval_spatial_size"] = img_size
+        encoder = HybridEncoder(**encoder_cfg)
     else:
-        raise ValueError(f"No valid encoder (LiteEncoder or HybridEncoder) specified for model size '{model_name}' in configs.py")
+        raise ValueError(f"No valid encoder configuration found for model size '{model_name}'.")
 
-    model_cfg["DEIMTransformer"]["eval_spatial_size"] = img_size
+    # Decoder configuration
+    decoder_cfg = model_cfg["DEIMTransformer"]
+    decoder_cfg["eval_spatial_size"] = img_size
 
     # Filter decoder kwargs to only include valid arguments for DEIMTransformer
-    decoder_args = model_cfg["DEIMTransformer"]
     sig = inspect.signature(DEIMTransformer.__init__)
-    valid_kwargs = {k: v for k, v in decoder_args.items() if k in sig.parameters}
+    valid_kwargs = {k: v for k, v in decoder_cfg.items() if k in sig.parameters}
     decoder = DEIMTransformer(num_classes=num_classes, **valid_kwargs) 
 
     model = DEIM(backbone, encoder, decoder)
@@ -116,6 +122,9 @@ def build_loss(model_name, num_classes, deim_criterion_cfg):
     model_cfg = models[model_name]
     # Correctly merge matcher configs
     matcher_config = {**model_cfg["matcher"], **deim_criterion_cfg['matcher']}
+
+    # Ensure use_focal_loss is set correctly for the matcher
+    matcher_config['use_focal_loss'] = True 
     matcher = HungarianMatcher(**matcher_config)
 
     # Convert DictConfig to a regular dict to allow deletion
@@ -139,30 +148,35 @@ def build_optimizer(model, optimizer_cfg):
     """
     param_groups = []
     visited_names = set()
+    all_params = dict(model.named_parameters())
 
     # Create parameter groups from the config's 'params' list
     if 'params' in optimizer_cfg:
         for pg_cfg in optimizer_cfg['params']:
             pattern = pg_cfg['params']
+            
+            # Find parameters that match the pattern AND have not been visited yet
             params_in_group = {
-                name: param for name, param in model.named_parameters()
-                if param.requires_grad and re.search(pattern, name)
+                name: param for name, param in all_params.items()
+                if param.requires_grad and re.search(pattern, name) and name not in visited_names
             }
             
             # Create a new dict for this group's config, excluding the 'params' key
             group_cfg = {k: v for k, v in pg_cfg.items() if k != 'params'}
-            group_cfg['params'] = params_in_group.values()
-            param_groups.append(group_cfg)
+            group_cfg['params'] = list(params_in_group.values()) # Use list() for safety
             
-            visited_names.update(params_in_group.keys())
+            if group_cfg['params']:
+                param_groups.append(group_cfg)
+                visited_names.update(params_in_group.keys())
 
     # Add remaining parameters to a default group
     remaining_params = [
-        param for name, param in model.named_parameters()
+        param for name, param in all_params.items()
         if param.requires_grad and name not in visited_names
     ]
     
     if remaining_params:
+        # This group will use the default optimizer settings (lr, weight_decay)
         param_groups.append({'params': remaining_params})
 
     # Create optimizer with the gathered parameter groups
@@ -176,3 +190,4 @@ def build_optimizer(model, optimizer_cfg):
         )
     else:
         raise NotImplementedError(f"Optimizer {optimizer_type} not implemented")
+

@@ -11,21 +11,10 @@ from omegaconf import DictConfig
 from onnxconverter_common import float16
 from torch import nn
 
-from src.dl.utils import get_latest_experiment_name
+from src.dl.utils import get_latest_experiment_name, get_model_builder
 
 INPUT_NAME = "input"
 OUTPUT_NAMES = ["logits", "boxes"]
-
-
-def get_model_builder(cfg: DictConfig):
-    if 'DEIMCriterion' in cfg.train:
-        logger.info("DEIMv2 model builder selected for export.")
-        from src.d_fine.deim import build_model
-        return build_model
-    else:
-        logger.info("D-FINE model builder selected for export.")
-        from src.d_fine.dfine import build_model
-        return build_model
 
 def prepare_model(cfg, device):
     build_model = get_model_builder(cfg)
@@ -35,10 +24,11 @@ def prepare_model(cfg, device):
         model = build_model(
             cfg.model_name, len(cfg.train.label_to_name), device,
             img_size=cfg.train.img_size,
+            pretrained_model_path=cfg.train.pretrained_model_path,
             deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
             hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
             lite_encoder_cfg=cfg.train.get('LiteEncoder'),
-            dinov3_stas_cfg=cfg.train.get('DINOv3STAs')  # <-- FIX
+            dinov3_stas_cfg=cfg.train.get('DINOv3STAs')
         )
     else:
         model = build_model(

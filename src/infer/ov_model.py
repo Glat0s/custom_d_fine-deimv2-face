@@ -44,6 +44,9 @@ class OV_model:
         else:
             self.np_dtype = np.float32
 
+        self.norm_mean = np.array([0.485, 0.456, 0.406], dtype=self.np_dtype).reshape((3, 1, 1))
+        self.norm_std = np.array([0.229, 0.224, 0.225], dtype=self.np_dtype).reshape((3, 1, 1))
+
         self._load_model()
         self._test_pred()
 
@@ -162,6 +165,9 @@ class OV_model:
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, then HWC to CHW
         img = np.ascontiguousarray(img, dtype=self.np_dtype)
         img /= 255.0
+
+        img = (img - self.norm_mean) / self.norm_std
+
         return img
 
     def _prepare_inputs(self, inputs):

@@ -124,23 +124,23 @@ sizes_cfg = {
         },
     },
     "s": {
-        "DINOv3STAs": { "name": "vit_tiny", "embed_dim": 192, "num_heads": 3, "weights_path": "./ckpts/vitt_distill.pt", "interaction_indexes": [3, 7, 11]},
-        "HybridEncoder": { "hidden_dim": 192, "depth_mult": 0.67, "expansion": 0.34, "dim_feedforward": 512},
+        "DINOv3STAs": { "name": "vit_tiny", "embed_dim": 192, "num_heads": 3, "weights_path": "./ckpts/vitt_distill.pt", "interaction_indexes": [3, 7, 11], "hidden_dim": 192}, # Added hidden_dim for consistency
+        "HybridEncoder": { "in_channels": [192, 192, 192], "hidden_dim": 192, "depth_mult": 0.67, "expansion": 0.34, "dim_feedforward": 512},
         "DEIMTransformer": {"feat_channels": [192, 192, 192], "hidden_dim": 192, "num_layers": 4, "dim_feedforward": 512, "num_points": [3, 6, 3],},
     },
     "m": {
-        "DINOv3STAs": { "name": "vit_tinyplus", "embed_dim": 256, "num_heads": 4, "weights_path": "./ckpts/vittplus_distill.pt", "interaction_indexes": [3, 7, 11]},
-        "HybridEncoder": {"hidden_dim": 256, "depth_mult": 1.0, "expansion": 0.67, "dim_feedforward": 512},
+        "DINOv3STAs": { "name": "vit_tinyplus", "embed_dim": 256, "num_heads": 4, "weights_path": "./ckpts/vittplus_distill.pt", "interaction_indexes": [3, 7, 11], "hidden_dim": 256}, # Added hidden_dim for consistency
+        "HybridEncoder": {"in_channels": [256, 256, 256], "hidden_dim": 256, "depth_mult": 1.0, "expansion": 0.67, "dim_feedforward": 512},
         "DEIMTransformer": {"feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 4, "dim_feedforward": 512, "num_points": [3, 6, 3],},
     },
     "l": {
         "DINOv3STAs": { "name": "dinov3_vits16", "weights_path": "./ckpts/dinov3_vits16.pth", "interaction_indexes": [5, 8, 11], "hidden_dim": 224, "conv_inplane": 32},
-        "HybridEncoder": {"hidden_dim": 224, "dim_feedforward": 896},
+        "HybridEncoder": {"in_channels": [224, 224, 224], "hidden_dim": 224, "dim_feedforward": 896},
         "DEIMTransformer": {"feat_channels": [224, 224, 224], "hidden_dim": 224, "num_layers": 4, "dim_feedforward": 1792, "num_points": [3, 6, 3],},
     },
     "x": {
         "DINOv3STAs": { "name": "dinov3_vits16plus", "weights_path": "./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth", "interaction_indexes": [5, 8, 11], "hidden_dim": 256, "conv_inplane": 64},
-        "HybridEncoder": {"hidden_dim": 256, "dim_feedforward": 1024, "expansion": 1.25, "depth_mult": 1.37},
+        "HybridEncoder": {"in_channels": [256, 256, 256], "hidden_dim": 256, "dim_feedforward": 1024, "expansion": 1.25, "depth_mult": 1.37},
         "DEIMTransformer": {"feat_channels": [256, 256, 256], "hidden_dim": 256, "num_layers": 6, "dim_feedforward": 2048, "num_points": [3, 6, 3],},
     },
 }

@@ -63,12 +63,6 @@ class DEIMCriterion(nn.Module):
         self.mal_alpha = mal_alpha
         self.use_uni_set = use_uni_set
 
-    def _get_mixup_weights(self, targets, indices):
-        if 'mixup' in targets[0]:
-            # The indices `i` point to the concatenated target tensors.
-            return torch.cat([t['mixup'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        return None
-
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
         assert 'pred_logits' in outputs
         src_logits = outputs['pred_logits']
@@ -155,24 +149,15 @@ class DEIMCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-        # Get mixup weights for Mixup and CopyBlend augmentations
-        mixup_weights = self._get_mixup_weights(targets, indices)
-
+        
         losses = {}
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-        if mixup_weights is not None:
-            loss_bbox = loss_bbox * mixup_weights.unsqueeze(-1)
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
         loss_giou = 1 - torch.diag(generalized_box_iou(
             box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes)))
         
-        # The boxes_weight is used for VFL/MAL, which is different from mixup weights
         loss_giou = loss_giou if boxes_weight is None else loss_giou * boxes_weight
-
-        if mixup_weights is not None:
-            loss_giou = loss_giou * mixup_weights
 
         losses['loss_giou'] = loss_giou.sum() / num_boxes
 
@@ -224,7 +209,8 @@ class DEIMCriterion(nn.Module):
                     loss_match_local = weight_targets_local * (T ** 2) * (nn.KLDivLoss(reduction='none')
                     (F.log_softmax(pred_corners / T, dim=1), F.softmax(target_corners.detach() / T, dim=1))).sum(-1)
                     if 'is_dn' not in outputs:
-                        batch_scale = 8 / outputs['pred_boxes'].shape[0]  # Avoid the influence of batch size per GPU
+                        # Avoid the influence of batch size per GPU. `8` is the per-GPU batch size from the paper.
+                        batch_scale = 8 / outputs['pred_boxes'].shape[0]
                         self.num_pos, self.num_neg = (mask.sum() * batch_scale) ** 0.5, ((~mask).sum() * batch_scale) ** 0.5
                     loss_match_local1 = loss_match_local[mask].mean() if mask.any() else 0
                     loss_match_local2 = loss_match_local[~mask].mean() if (~mask).any() else 0
@@ -357,6 +343,9 @@ class DEIMCriterion(nn.Module):
         if 'pre_outputs' in outputs:
             aux_outputs = outputs['pre_outputs']
             for loss in self.losses:
+                if loss in ['local']:
+                    continue
+
                 use_uni_set = self.use_uni_set and (loss in ['boxes', 'local'])
                 indices_in = indices_go if use_uni_set else cached_indices[-1]
                 num_boxes_in = num_boxes_go if use_uni_set else num_boxes
@@ -366,6 +355,14 @@ class DEIMCriterion(nn.Module):
                 l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                 l_dict = {k + '_pre': v for k, v in l_dict.items()}
                 losses.update(l_dict)
+
+            # In case of auxiliary traditional head output at first decoder layer, just for dfine
+            if 'dn_pre_outputs' in outputs:
+                aux_outputs = outputs['dn_pre_outputs']
+                for loss in self.losses:
+                    # ADD THIS CHECK
+                    if loss in ['local']:
+                        continue
 
         # In case of encoder auxiliary losses.
         if 'enc_aux_outputs' in outputs:
@@ -382,9 +379,10 @@ class DEIMCriterion(nn.Module):
 
             for i, aux_outputs in enumerate(outputs['enc_aux_outputs']):
                 for loss in self.losses:
-                    # For encoder outputs, NEVER use the unified set of indices.
-                    indices_in = cached_indices_enc[i]
-                    num_boxes_in = num_boxes
+                    # original logic for encoder loss indexing
+                    use_uni_set_for_encoder = self.use_uni_set and (loss == 'boxes')
+                    indices_in = indices_go if use_uni_set_for_encoder else cached_indices_enc[i]
+                    num_boxes_in = num_boxes_go if use_uni_set_for_encoder else num_boxes
                     
                     if loss in ['local']: # Also skip local loss for encoder
                         continue

@@ -93,7 +93,6 @@ train:
   ### EMA ###
   use_ema: True # use exponential moving average model
   ema_momentum: 0.9999
-  ema_restart_decay: 0.9999
 
   ### Optimizer ###
   optimizer:
@@ -112,10 +111,13 @@ train:
         lr: ${train.lrs.${model_name}.backbone_lr}
         weight_decay: 0.
       - 
-        # All other norm/bias params (encoder, decoder, etc.)
-        params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+        # All other norm/bias params (sta, encoder, decoder, etc.)
+        params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
         weight_decay: 0.
-  
+      -
+        # All other parameters (e.g., non-norm/bias from encoder/decoder)
+        params: '.*'
+
   ### Scheduler ###
   lr_scheduler:
     type: flatcosine # 'onecycle' or 'flatcosine'
@@ -137,12 +139,12 @@ train:
     ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
 
   mixup_augs:
-    mixup_prob: 0.5
+    mixup_prob: 0.5 # Probability to apply mixup within the policy range
     mixup_epochs: [4, 29]
 
   copyblend_augs:
     copyblend_prob: 0.5
-    copyblend_type: blend
+    copyblend_type: blend # 'blend' or 'paste'
     copyblend_epochs: [4, 50]
     area_threshold: 100
     num_objects: 3

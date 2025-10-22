@@ -19,16 +19,12 @@ from tabulate import tabulate
 
 
 def get_model_builder(cfg: DictConfig):
-    """Selects the model builder based on the criterion specified in the config."""
-    if 'DEIMCriterion' in cfg.train:
-        logger.info("DEIMv2 model and criterion selected.")
-        from src.d_fine.deim import build_model
-        return build_model
-    else:
-        logger.info("D-FINE model and criterion selected.")
-        from src.d_fine.dfine import build_model
-        return build_model
-
+    """Selects the model builder based on the config."""
+    # This repository implements the DEIMv2 architecture.
+    # The D-FINE components are integrated within the DEIMv2 modules.
+    logger.info("DEIMv2 model and criterion selected.")
+    from src.d_fine.deim import build_model
+    return build_model
 
 def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
     torch.manual_seed(seed)
@@ -42,7 +38,6 @@ def set_seeds(seed: int, cudnn_fixed: bool = False) -> None:
         torch.backends.cudnn.benchmark = False
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         os.environ["PYTHONHASHSEED"] = str(seed)
-
 
 def seed_worker(worker_id):  # noqa
     worker_seed = torch.initial_seed() % 2**32

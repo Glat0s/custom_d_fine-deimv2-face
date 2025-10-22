@@ -154,9 +154,11 @@ class TransformerDecoder(nn.Module):
         project = weighting_function(self.reg_max, up, reg_scale) if not hasattr(self, 'project') else self.project
 
         ref_points_detach = F.sigmoid(ref_points_unact)
-        query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
 
         for i, layer in enumerate(self.layers):
+
+            query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
+
             ref_points_input = ref_points_detach.unsqueeze(2)
 
             if i >= self.eval_idx + 1 and self.layer_scale > 1:
@@ -176,7 +178,9 @@ class TransformerDecoder(nn.Module):
             inter_ref_bbox = distance2bbox(ref_points_initial, integral(pred_corners, project), reg_scale)
 
             if self.training or i == self.eval_idx:
-                scores = self.lqe_layers[i](score_head[i](output), pred_corners)
+                scores = score_head[i](output)
+                # Lqe is a core part of the D-FINE/DEIMv2 architecture
+                scores = self.lqe_layers[i](scores, pred_corners)
                 dec_out_logits.append(scores)
                 dec_out_bboxes.append(inter_ref_bbox)
                 dec_out_pred_corners.append(pred_corners)

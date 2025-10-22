@@ -15,6 +15,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
+from src.dl.torchvision_transforms import RandomZoomOut
 from src.dl.utils import (
     LetterboxRect,
     abs_xyxy_to_norm_xywh,
@@ -62,11 +63,12 @@ class CustomDataset(Dataset):
         self.use_one_class = cfg.train.use_one_class
         self.cases_to_debug = 20
         self.epoch = 0
-        # Store augmentation policy from config
+
         self.aug_policy_ops = cfg.train.aug_policy.ops
         self.aug_policy_epochs = cfg.train.aug_policy.epoch
-        self.cfg_augs = cfg.train.augs  # Store aug config for easy access
-        self.mosaic_transform = A.Compose(
+        self.cfg_augs = cfg.train.augs
+
+        self.normalize_transform = A.Compose(
             [
                 A.Normalize(mean=self.norm[0], std=self.norm[1]),
                 ToTensorV2(),
@@ -182,16 +184,16 @@ class CustomDataset(Dataset):
         box_widths = mosaic_targets[:, 3] - mosaic_targets[:, 1]
         mosaic_targets = mosaic_targets[np.minimum(box_heights, box_widths) > 1]
 
-        image = self.mosaic_transform(image=mosaic_img)["image"]
-        labels = torch.tensor(mosaic_targets[:, 0], dtype=torch.int64)
-        boxes = torch.tensor(mosaic_targets[:, 1:5], dtype=torch.float32)
-        areas = torch.tensor(mosaic_targets[:, 5], dtype=torch.float32)
-
-        return image, labels, boxes, areas, torch.tensor([self.target_h, self.target_w])
+        # Return numpy arrays and lists, not tensors
+        labels = mosaic_targets[:, 0].tolist() if mosaic_targets.shape[0] > 0 else []
+        boxes = mosaic_targets[:, 1:5] if mosaic_targets.shape[0] > 0 else []
+        
+        # We don't need to return area, as it can be recalculated after transforms
+        return mosaic_img, labels, boxes, np.array([self.target_h, self.target_w])
 
     def _get_transform(self, mosaic_applied=False):
         # Common components for all modes
-        norm = [A.Normalize(mean=self.norm[0], std=self.norm[1]), ToTensorV2()]
+        to_tensor = [ToTensorV2()]
         resize = [A.Resize(self.target_h, self.target_w, interpolation=cv2.INTER_AREA)]
 
         if self.mode == "train":
@@ -203,11 +205,10 @@ class CustomDataset(Dataset):
 
             if use_strong_augs:
                 policy_ops = self.aug_policy_ops
-                # Add strong augmentations from the policy
                 if "RandomPhotometricDistort" in policy_ops:
                     augs.append(A.ColorJitter(p=self.cfg_augs.photometric_distort_p))
 
-                # RandomIoUCrop and RandomZoomOut are mutually exclusive with Mosaic
+                # Ensure IoUCrop and ZoomOut are never applied with Mosaic
                 if not mosaic_applied:
                     if "RandomIoUCrop" in policy_ops:
                         augs.append(
@@ -219,30 +220,26 @@ class CustomDataset(Dataset):
                             )
                         )
                     if "RandomZoomOut" in policy_ops:
-                        # Approximating RandomZoomOut with RandomScale + PadIfNeeded
-                        augs.append(A.RandomScale(scale_limit=(-0.5, 0), p=self.cfg_augs.zoom_out_p))
-                        augs.append(
-                            A.PadIfNeeded(
-                                min_height=self.target_h,
-                                min_width=self.target_w,
-                                border_mode=cv2.BORDER_CONSTANT,
-                                value=(0, 0, 0), # <-- Use the correct argument `value` with a tuple for RGB
-                            )
-                        )
+                        augs.append(RandomZoomOut(side_range=(1.0, 4.0), p=self.cfg_augs.zoom_out_p))
 
             return A.Compose(
-                augs + resize + norm,
+                augs + resize,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
         else:  # val, test, bench modes
             return A.Compose(
-                resize + norm,
+                resize,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
 
     def __getitem__(self, idx: int):
         image_path = Path(self.split.iloc[idx].values[0])
         mosaic_applied = False
+
+        mosaic_active = (
+            "Mosaic" in self.aug_policy_ops
+            and self.aug_policy_epochs[0] <= self.epoch < self.aug_policy_epochs[2]
+        )
 
         # Check if Mosaic is an active op in the policy for the current epoch
         mosaic_active = (
@@ -251,7 +248,8 @@ class CustomDataset(Dataset):
         )
 
         if self.mode == "train" and mosaic_active and random.random() < self.mosaic_prob:
-            image, labels, boxes, areas, orig_size = self._load_mosaic(idx)
+            image, class_labels, bboxes, orig_size_np = self._load_mosaic(idx)
+            orig_size = torch.from_numpy(orig_size_np)
             mosaic_applied = True
         else:
             image, targets, orig_size = self._get_data(idx)
@@ -259,28 +257,27 @@ class CustomDataset(Dataset):
             if self.ignore_background and targets.shape[0] == 0 and self.mode == "train":
                 return None
 
-            box_heights = targets[:, 4] - targets[:, 2]
-            box_widths = targets[:, 3] - targets[:, 1]
-            targets = targets[np.minimum(box_heights, box_widths) > 0]
+            bboxes = targets[:, 1:5].tolist() if targets.shape[0] > 0 else []
+            class_labels = targets[:, 0].tolist() if targets.shape[0] > 0 else []
 
-            bboxes = targets[:, 1:5] if targets.shape[0] > 0 else []
-            class_labels = targets[:, 0] if targets.shape[0] > 0 else []
+        # Get the appropriate transform pipeline
+        transform = self._get_transform(mosaic_applied=mosaic_applied)
+        
+        # Apply transforms to image, boxes, and labels
+        transformed = transform(image=image, bboxes=bboxes, class_labels=class_labels)
+        
+        image = transformed["image"]
 
-            # Dynamically get transform based on epoch
-            transform = self._get_transform(mosaic_applied=mosaic_applied)
-            transformed = transform(image=image, bboxes=bboxes, class_labels=class_labels)
+        boxes = (
+            torch.tensor(transformed["bboxes"], dtype=torch.float32)
+            if len(transformed["bboxes"]) > 0
+            else torch.zeros((0, 4), dtype=torch.float32)
+        )
+        labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
 
-            image = transformed["image"]
-            boxes = (
-                torch.tensor(transformed["bboxes"], dtype=torch.float32)
-                if len(transformed["bboxes"]) > 0
-                else torch.zeros((0, 4), dtype=torch.float32)
-            )
-            labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
-            # Filter boxes with non-positive width/height, which can occur after RandomSizedBBoxSafeCrop or RandomScale
-            valid_boxes_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
-            boxes, labels = boxes[valid_boxes_mask], labels[valid_boxes_mask]
-            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        valid_boxes_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+        boxes, labels = boxes[valid_boxes_mask], labels[valid_boxes_mask]
+        areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
         if self.debug_img_processing and idx <= self.cases_to_debug:
             self._debug_image(idx, image, boxes, labels, image_path)
@@ -303,8 +300,6 @@ class Loader:
         num_workers: int,
         cfg: DictConfig,
         debug_img_processing: bool = False,
-        base_size_repeat: int = None,
-        stop_epoch_multiscale: int = None,
     ) -> None:
         self.root_path = root_path
         self.img_size = img_size
@@ -317,8 +312,8 @@ class Loader:
         self._get_splits()
         self.class_names = list(cfg.train.label_to_name.values())
 
-        self.base_size_repeat = base_size_repeat
-        self.stop_epoch_multiscale = stop_epoch_multiscale # The epoch after which multiscale stops
+        self.base_size_repeat = cfg.train.dataloader.get("base_size_repeat")
+        self.stop_epoch_multiscale = cfg.train.lr_scheduler.get("no_aug_epochs") # Or a dedicated param
         self.scales = generate_scales(self.base_size, self.base_size_repeat) if self.base_size_repeat is not None else None
 
         # Store mixup and copyblend configs from the main config
@@ -455,7 +450,11 @@ class Loader:
             targets.append(target_dict)
             img_paths.append(item[4])
 
-        return torch.stack(images, dim=0), targets, img_paths
+        images = torch.stack(images, dim=0)
+
+        # Apply normalization here for validation
+        images = self.normalize_transform(image=images.permute(0, 2, 3, 1).numpy())["image"]
+        return images, targets, img_paths
 
     def val_collate_fn(self, batch) -> Tuple:
         return self._collate_fn(batch)
@@ -480,43 +479,47 @@ class Loader:
         images = torch.stack(images, dim=0)
 
         # DEIMv2 Augmentations
+        # Check if Mixup/CopyBlend should be active for the current epoch
         mixup_active = (
             self.mixup_cfg.get("mixup_prob", 0.0) > 0 and
             self.mixup_cfg.get("mixup_epochs", [0, 0])[0] <= self.epoch < self.mixup_cfg.get("mixup_epochs", [0, 0])[1]
         )
         copyblend_active = (
-            self.copyblend_cfg.get("copyblend_prob", 0.0) > 0 and
-            self.copyblend_cfg.get("copyblend_epochs", [0, 0])[0]
+            self.copyblend_cfg.copyblend_prob > 0 and
+            self.copyblend_cfg.copyblend_epochs[0]
             <= self.epoch
-            < self.copyblend_cfg.get("copyblend_epochs", [0, 0])[1]
+            < self.copyblend_cfg.copyblend_epochs[1]
         )
 
-        # Probabilistically apply Mixup or CopyBlend, ensuring they are mutually exclusive per batch
         r = random.random()
         mixup_prob = self.mixup_cfg["mixup_prob"] if mixup_active else 0.0
         copyblend_prob = self.copyblend_cfg.copyblend_prob if copyblend_active else 0.0
 
         if r < mixup_prob:
-            # Apply Mixup
-            beta = random.uniform(0.45, 0.55)
-            images = images.roll(shifts=1, dims=0).mul_(1.0 - beta).add_(images.mul(beta))
 
+            beta = random.uniform(0.8, 1.0) # Or another range, e.g., 0.45, 0.55 as in CopyBlend
+
+            # Shift images for mixup
+            shifted_images = images.roll(shifts=1, dims=0)
+            images = images.mul_(beta).add_(shifted_images.mul_(1.0 - beta))
+
+            # Shift targets list
             shifted_targets = targets[-1:] + targets[:-1]
-            updated_targets = deepcopy(targets)  # Use deepcopy to avoid modifying original targets
+            
+            # Create a new list of updated targets to avoid modifying originals in place
+            new_targets = []
             for i in range(len(targets)):
-                updated_targets[i]["boxes"] = torch.cat([targets[i]["boxes"], shifted_targets[i]["boxes"]], dim=0)
-                updated_targets[i]["labels"] = torch.cat(
-                    [targets[i]["labels"], shifted_targets[i]["labels"]], dim=0
-                )
-                updated_targets[i]["area"] = torch.cat([targets[i]["area"], shifted_targets[i]["area"]], dim=0)
-                updated_targets[i]['mixup'] = torch.tensor(
-                    [beta] * len(targets[i]['labels']) + [1.0 - beta] * len(shifted_targets[i]['labels']),
-                    dtype=torch.float32
-                )
-            targets = updated_targets
+                new_target_dict = {
+                    "boxes": torch.cat([targets[i]["boxes"], shifted_targets[i]["boxes"]], dim=0),
+                    "labels": torch.cat([targets[i]["labels"], shifted_targets[i]["labels"]], dim=0),
+                    "area": torch.cat([targets[i]["area"], shifted_targets[i]["area"]], dim=0),
+                    "orig_size": targets[i]["orig_size"] # Keep original size from the primary image
+                }
+                new_targets.append(new_target_dict)
+            targets = new_targets
 
         elif r < mixup_prob + copyblend_prob:
-            # Apply CopyBlend
+
             objects_pool = defaultdict(list)
             img_height, img_width = images.shape[-2:]
             beta = random.uniform(0.45, 0.55)
@@ -534,7 +537,7 @@ class Loader:
 
             if len(objects_pool["boxes"]) > 0:
                 updated_images = images.clone()
-                updated_targets = deepcopy(targets) # Use deepcopy before modification
+                updated_targets = deepcopy(targets)
                 for i in range(len(images)):
                     if self.cfg.train.copyblend_augs.random_num_objects:
                         num_to_blend = random.randint(1, self.cfg.train.copyblend_augs.num_objects)
@@ -632,37 +635,14 @@ class Loader:
                         new_w, new_h = patch_w / img_width, patch_h / img_height
                         blend_mixup_ratios.append(1.0 - beta)
 
+                        # The criterion doesn't support mixup weights, so we only add the new boxes/labels.
                         new_box = torch.tensor([new_cx, new_cy, new_w, new_h], device=images.device)
                         updated_targets[i]["boxes"] = torch.cat([updated_targets[i]["boxes"], new_box.unsqueeze(0)])
-                        updated_targets[i]["labels"] = torch.cat(
-                            [updated_targets[i]["labels"], label.unsqueeze(0)]
-                        )
-                        updated_targets[i]["area"] = torch.cat(
-                            [
-                                updated_targets[i]["area"],
-                                torch.tensor([patch_w * patch_h], device=images.device),
-                            ]
-                        )
-
-                    # Add mixup ratio to the target dictionary for the current image
-                    if blend_mixup_ratios:
-                        if 'mixup' not in updated_targets[i]:
-                             updated_targets[i]['mixup'] = torch.tensor([1.0] * (len(targets[i]['boxes'])), dtype=torch.float32)
-
-                        updated_targets[i]['mixup'] = torch.cat([
-                            updated_targets[i]['mixup'],
-                            torch.tensor(blend_mixup_ratios, dtype=torch.float32)
-                        ])
+                        updated_targets[i]["labels"] = torch.cat([updated_targets[i]["labels"], label.unsqueeze(0)])
+                        updated_targets[i]["area"] = torch.cat([updated_targets[i]["area"], torch.tensor([patch_w * patch_h], device=images.device)])
 
                 images = updated_images
                 targets = updated_targets
-
-        # After mixup or copyblend, ensure all targets have the 'mixup' key if any target has it.
-        # This prevents errors in the loss function when a batch is partially augmented.
-        if any('mixup' in t for t in targets):
-            for t in targets:
-                if 'mixup' not in t:
-                    t['mixup'] = torch.ones(len(t['boxes']), dtype=torch.float32)
 
         # Multiscale training - active except for the last `no_aug_epochs`
         if self.scales is not None and self.epoch < self.stop_epoch_multiscale:
@@ -670,5 +650,8 @@ class Loader:
             # Only resize if the size is different to avoid unnecessary operations
             if images.shape[-1] != sz:
                 images = F.interpolate(images, size=sz, mode='bilinear', align_corners=False)
+
+        # Apply normalization as the final step
+        images = self.normalize_transform(image=images.permute(0, 2, 3, 1).numpy())["image"]
 
         return images, targets, img_paths

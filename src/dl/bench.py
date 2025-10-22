@@ -215,7 +215,7 @@ def main(cfg: DictConfig):
         img_size=tuple(cfg.train.img_size),
         batch_size=1,
         num_workers=1,
-        cfg=cfg,
+        cfg=cfg, # This is correct
         debug_img_processing=False,
     ).build_dataloaders()
 

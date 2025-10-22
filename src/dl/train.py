@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple
 
 import hydra
 import numpy as np
+from src.d_fine import dist_utils
 import torch
 import torch.nn.functional as F
 import wandb
@@ -21,6 +22,7 @@ from src.dl.dataset import Loader
 from src.dl.lr_scheduler import FlatCosineLRScheduler
 from src.dl.utils import get_model_builder, calculate_remaining_time, filter_preds, get_vram_usage, log_metrics_locally, process_boxes, save_metrics, set_seeds, visualize, wandb_logger
 from src.dl.validator import Validator
+from src.d_fine.deim import build_loss, build_optimizer
 
 class ModelEMA:
     def __init__(self, student, ema_momentum):
@@ -70,12 +72,6 @@ class Trainer:
 
         set_seeds(cfg.train.seed, cfg.train.cudnn_fixed)
         
-        if 'DEIMCriterion' in cfg.train:
-            from src.d_fine.deim import build_loss, build_optimizer
-        else:
-            # Import the correct optimizer builder for the D-FINE model path
-            from src.d_fine.dfine import build_loss, build_optimizer
-        
         build_model = get_model_builder(cfg)
 
         self.stop_epoch = self.epochs - self.cfg.train.lr_scheduler.no_aug_epochs
@@ -89,29 +85,20 @@ class Trainer:
         )
         self.train_loader, self.val_loader, self.test_loader = self.base_loader.build_dataloaders()
         
-        if 'DEIMCriterion' in cfg.train:
-            self.model = build_model(
-                cfg.model_name, self.num_labels, self.device,
-                img_size=cfg.train.img_size,
-                pretrained_model_path=cfg.train.pretrained_model_path,
-                deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
-                hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
-                lite_encoder_cfg=cfg.train.get('LiteEncoder'),
-                dinov3_stas_cfg=cfg.train.get('DINOv3STAs')  # <-- FIX
-            )
-        else:
-            self.model = build_model(
-                cfg.model_name, self.num_labels, self.device,
-                img_size=cfg.train.img_size,
-                pretrained_model_path=cfg.train.pretrained_model_path
-            )
+        self.model = build_model(
+            cfg.model_name, self.num_labels, self.device,
+            img_size=cfg.train.img_size,
+            pretrained_model_path=cfg.train.pretrained_model_path,
+            deim_transformer_cfg=cfg.train.get('DEIMTransformer'),
+            hybrid_encoder_cfg=cfg.train.get('HybridEncoder'),
+            lite_encoder_cfg=cfg.train.get('LiteEncoder'),
+            dinov3_stas_cfg=cfg.train.get('DINOv3STAs')
+        )
 
         self.ema_model = ModelEMA(self.model, cfg.train.ema_momentum) if cfg.train.use_ema else None
         
         self.loss_fn = build_loss(
             cfg.model_name, self.num_labels, deim_criterion_cfg=cfg.train.get('DEIMCriterion')
-        ) if 'DEIMCriterion' in cfg.train else build_loss(
-            cfg.model_name, self.num_labels, cfg.train.label_smoothing
         )
 
         self.optimizer = build_optimizer(self.model, cfg.train.optimizer)
@@ -133,7 +120,8 @@ class Trainer:
                 total_epochs=cfg.train.epochs,
                 warmup_iter=scheduler_cfg.warmup_iter,
                 flat_epochs=scheduler_cfg.flat_epochs,
-                no_aug_epochs=scheduler_cfg.no_aug_epochs
+                no_aug_epochs=scheduler_cfg.no_aug_epochs,
+                scheduler_type="cosine" 
             )
             self.self_lr_scheduler = True
         elif scheduler_cfg.type == 'onecycle':
@@ -228,8 +216,9 @@ class Trainer:
             all_gt.extend(gt)
 
             if self.to_visualize_eval and idx <= 5:
+                # We can still filter here for visualization purposes only
                 visualize(
-                    img_paths, gt, filter_preds(preds, self.conf_thresh),
+                    img_paths, gt, filter_preds(copy.deepcopy(preds), self.conf_thresh),
                     dataset_path=Path(self.cfg.train.data_path) / "images",
                     path_to_save=self.eval_preds_path,
                     label_to_name=self.label_to_name,
@@ -250,12 +239,13 @@ class Trainer:
         return metrics
 
     def train(self) -> None:
-        best_metric, best_metric_stage1, cur_iter, ema_iter = 0, 0, 0, 0
+        best_metric, ema_iter = 0, 0 
+        cur_iter = 0  # Initialize optimizer step counter
         self.early_stopping_steps = 0
         one_epoch_time = None
 
         def optimizer_step():
-            nonlocal ema_iter
+            nonlocal ema_iter, cur_iter # Add cur_iter here
             if self.amp_enabled:
                 if self.clip_max_norm:
                     self.scaler.unscale_(self.optimizer)
@@ -267,14 +257,17 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_max_norm)
                 self.optimizer.step()
 
-            # OneCycleLR is stepped after each optimizer update
-            if not self.self_lr_scheduler and self.scheduler:
-                self.scheduler.step()
+            # Step schedulers AFTER optimizer step
+            if self.lr_scheduler or self.scheduler:
+                scheduler_to_step = self.lr_scheduler if self.self_lr_scheduler else self.scheduler
+                if self.self_lr_scheduler:
+                    scheduler_to_step.step(cur_iter, self.optimizer)
+                else:
+                    scheduler_to_step.step()
+
+            cur_iter += 1 # Increment only on optimizer step
 
             self.optimizer.zero_grad()
-            if self.ema_model:
-                ema_iter += 1
-                self.ema_model.update(ema_iter, self.model)
 
         for epoch in range(1, self.epochs + 1):
             epoch_start_time = time.time()
@@ -282,43 +275,15 @@ class Trainer:
             self.loss_fn.train()
             losses = []
             
-            # Inform dataloader about the current epoch
             self.base_loader.set_epoch(epoch)
 
-            # Added: Handle ignore_background_epochs
-            if self.cfg.train.ignore_background_epochs > 0:
-                if epoch <= self.cfg.train.ignore_background_epochs:
-                    self.train_loader.dataset.ignore_background = True
-                    if epoch == 1:
-                         logger.info(f"Ignoring background images for the first {self.cfg.train.ignore_background_epochs} epochs.")
-                elif epoch == self.cfg.train.ignore_background_epochs + 1:
-                    self.train_loader.dataset.ignore_background = False
-                    logger.info("Resuming use of background images.")
-
-            # EMA restart logic
-            if epoch == self.stop_epoch:
-                logger.info(f"--- End of Stage 1 at epoch {epoch}. Reloading best model and resetting EMA. ---")
-                if (self.path_to_save / "best_stg1.pt").exists():
-                    state_dict = torch.load(self.path_to_save / "best_stg1.pt", map_location=self.device)
-                    self.model.load_state_dict(state_dict)
-                    
-                    if self.ema_model:
-                        self.ema_model = ModelEMA(self.model, self.cfg.train.ema_restart_decay)
-                        ema_iter = 0
-                    
-                    best_metric = 0
-                else:
-                    logger.warning("best_stg1.pt not found. Continuing without reloading.")
+            if dist_utils.is_dist_available_and_initialized():
+                self.train_loader.sampler.set_epoch(epoch)
 
             with tqdm(self.train_loader, unit="batch") as tepoch:
                 for batch_idx, (inputs, targets, _) in enumerate(tepoch):
                     tepoch.set_description(f"Epoch {epoch}/{self.epochs}")
                     if inputs is None: continue
-                    cur_iter += 1
-
-                    # FlatCosineLRScheduler is stepped each iteration (before optimizer step)
-                    if self.self_lr_scheduler:
-                        self.lr_scheduler.step(cur_iter, self.optimizer)
 
                     inputs = inputs.to(self.device)
                     targets = [{k: v.to(self.device) if hasattr(v, "to") else v for k, v in t.items()} for t in targets]
@@ -337,6 +302,10 @@ class Trainer:
                         loss_dict = self.loss_fn(output, targets, epoch=epoch)
                         loss = sum(loss_dict.values()) / self.b_accum_steps
                         loss.backward()
+
+                    if self.ema_model:
+                        ema_iter += 1
+                        self.ema_model.update(ema_iter, self.model)
 
                     if (batch_idx + 1) % self.b_accum_steps == 0:
                         optimizer_step()
@@ -365,22 +334,17 @@ class Trainer:
             model_to_save = self.ema_model.model if self.ema_model else self.model
             self.path_to_save.mkdir(parents=True, exist_ok=True)
             torch.save(model_to_save.state_dict(), self.path_to_save / "last.pt")
-            decision_metric = (metrics.get("mAP_50", 0) + metrics.get("f1", 0)) / 2
 
-            if epoch < self.stop_epoch:  # Stage 1: Training with heavy augmentations
-                if decision_metric > best_metric_stage1:
-                    best_metric_stage1 = decision_metric
-                    logger.info("Saving new best stage 1 model 🔥")
-                    torch.save(model_to_save.state_dict(), self.path_to_save / "best_stg1.pt")
-            else:  # Stage 2: Fine-tuning with light/no augmentations
-                if decision_metric > best_metric:
-                    best_metric = decision_metric
-                    logger.info("Saving new best model (stage 2) 🔥")
-                    torch.save(model_to_save.state_dict(), self.path_to_save / "model.pt")
-                    self.early_stopping_steps = 0
-                else:
-                    self.early_stopping_steps += 1
-                    logger.warning(f"Metric did not improve. Early stopping counter: {self.early_stopping_steps}/{self.early_stopping}")
+            decision_metric = (metrics.get("mAP_50", 0) + metrics.get("f1", 0)) / 2
+            
+            if decision_metric > best_metric:
+                best_metric = decision_metric
+                logger.info(f"Saving new best model with metric: {best_metric:.4f} 🔥")
+                torch.save(model_to_save.state_dict(), self.path_to_save / "model.pt")
+                self.early_stopping_steps = 0
+            else:
+                self.early_stopping_steps += 1
+                logger.warning(f"Metric did not improve. Early stopping counter: {self.early_stopping_steps}/{self.early_stopping}")
 
             save_metrics({}, metrics, np.mean(losses) * self.b_accum_steps, epoch, path_to_save=None, use_wandb=self.use_wandb)
 

@@ -304,12 +304,21 @@ def random_affine(img, targets, segments, target_size, degrees, translate, scale
             new[i] = segment2box(xy, target_size[0], target_size[1])
 
     # filter candidates
-    i = box_candidates(box1=targets[:, 1:5].T * scale, box2=new.T, area_thr=0.1)
-    targets = targets[i]
-    targets[:, 1:5] = new[i]
+    box_w = new[:, 2] - new[:, 0]
+    box_h = new[:, 3] - new[:, 1]
+    
+    # Keep boxes with positive width and height, and area > 1 pixel.
+    # Also, ensure they are not excessively long and thin.
+    keep = (box_w > 0) & (box_h > 0)
+    if keep.any():
+        area = box_w * box_h
+        ar = np.maximum(box_w / (box_h + 1e-16), box_h / (box_w + 1e-16)) # aspect ratio
+        keep &= (area > 1) & (ar < 20)
+
+    targets = targets[keep]
+    targets[:, 1:5] = new[keep]
 
     return img, targets
-
 
 def get_mosaic_coordinate(mosaic_image, mosaic_index, xc, yc, w, h, target_h, target_w):
     # TODO update doc

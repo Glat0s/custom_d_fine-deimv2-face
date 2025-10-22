@@ -378,13 +378,13 @@ class DEIMCriterion(nn.Module):
                 enc_targets = targets
 
             for i, aux_outputs in enumerate(outputs['enc_aux_outputs']):
+                # The encoder's auxiliary loss should ALWAYS use its own matches, not the union set 'indices_go'.
+                indices_in = cached_indices_enc[i]
+                # Use the standard 'num_boxes' for normalization, not 'num_boxes_go'.
+                num_boxes_in = num_boxes 
+
                 for loss in self.losses:
-                    # original logic for encoder loss indexing
-                    use_uni_set_for_encoder = self.use_uni_set and (loss == 'boxes')
-                    indices_in = indices_go if use_uni_set_for_encoder else cached_indices_enc[i]
-                    num_boxes_in = num_boxes_go if use_uni_set_for_encoder else num_boxes
-                    
-                    if loss in ['local']: # Also skip local loss for encoder
+                    if loss in ['local']:  # Encoder doesn't have components for 'local' loss.
                         continue
 
                     meta = self.get_loss_meta_info(loss, aux_outputs, enc_targets, indices_in)

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import functools
 from typing import List
 
-from .utils import get_activation
+from .common import get_activation
 from ..utils import deformable_attention_core_func_v2
 
 class MSDeformableAttention(nn.Module):
@@ -90,7 +90,7 @@ class LQE(nn.Module):
         super().__init__()
         self.k = k
         self.reg_max = reg_max
-        from .deim_utils import MLP
+        from ..deim_utils import MLP
         self.reg_conf = MLP(4 * (k + 1), hidden_dim, 1, num_layers, act=act)
         nn.init.constant_(self.reg_conf.layers[-1].bias, 0)
         nn.init.constant_(self.reg_conf.layers[-1].weight, 0)

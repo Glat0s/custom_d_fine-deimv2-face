@@ -1,3 +1,4 @@
+import copy
 import math
 import time
 from copy import deepcopy
@@ -80,8 +81,6 @@ class Trainer:
             root_path=Path(cfg.train.data_path), img_size=tuple(cfg.train.img_size),
             batch_size=cfg.train.batch_size, num_workers=cfg.train.num_workers,
             cfg=cfg, debug_img_processing=cfg.train.debug_img_processing,
-            base_size_repeat=cfg.train.dataloader.get("base_size_repeat"),
-            stop_epoch_multiscale=self.stop_epoch,
         )
         self.train_loader, self.val_loader, self.test_loader = self.base_loader.build_dataloaders()
         

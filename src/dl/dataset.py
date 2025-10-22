@@ -83,14 +83,20 @@ class CustomDataset(Dataset):
     def _debug_image(
         self, idx, image: torch.Tensor, boxes: torch.Tensor, classes: torch.Tensor, img_path: Path
     ) -> None:
-        mean = np.array(self.norm[0]).reshape(-1, 1, 1)
-        std = np.array(self.norm[1]).reshape(-1, 1, 1)
+        # The image is now a tensor, so we handle it directly
         image_np = image.cpu().numpy()
-        image_np = (image_np * std) + mean
+        
+        # Denormalize if it was normalized
+        if image_np.max() <= 1.0 and image_np.min() < 0:
+            mean = np.array(self.norm[0]).reshape(-1, 1, 1)
+            std = np.array(self.norm[1]).reshape(-1, 1, 1)
+            image_np = (image_np * std) + mean
+
         image_np = np.transpose(image_np, (1, 2, 0))
         image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
         image_np = np.ascontiguousarray(image_np)
 
+        # Convert boxes from xyxy tensor to numpy int for drawing
         boxes_np = boxes.cpu().numpy().astype(int)
         classes_np = classes.cpu().numpy()
         for box, class_id in zip(boxes_np, classes_np):
@@ -182,11 +188,13 @@ class CustomDataset(Dataset):
 
         box_heights = mosaic_targets[:, 4] - mosaic_targets[:, 2]
         box_widths = mosaic_targets[:, 3] - mosaic_targets[:, 1]
-        mosaic_targets = mosaic_targets[np.minimum(box_heights, box_widths) > 1]
+        # Ensure boxes have a positive area
+        mosaic_targets = mosaic_targets[(box_widths > 0) & (box_heights > 0)]
 
         # Return numpy arrays and lists, not tensors
         labels = mosaic_targets[:, 0].tolist() if mosaic_targets.shape[0] > 0 else []
-        boxes = mosaic_targets[:, 1:5] if mosaic_targets.shape[0] > 0 else []
+        # Convert the numpy array to a list to be consistent
+        boxes = mosaic_targets[:, 1:5].tolist() if mosaic_targets.shape[0] > 0 else []
         
         # We don't need to return area, as it can be recalculated after transforms
         return mosaic_img, labels, boxes, np.array([self.target_h, self.target_w])
@@ -195,6 +203,12 @@ class CustomDataset(Dataset):
         # Common components for all modes
         to_tensor = [ToTensorV2()]
         resize = [A.Resize(self.target_h, self.target_w, interpolation=cv2.INTER_AREA)]
+
+        # The normalization and ToTensor steps are now part of the main pipeline
+        normalize_and_tensor = [
+            A.Normalize(mean=self.norm[0], std=self.norm[1]),
+            ToTensorV2(),
+        ]
 
         if self.mode == "train":
             # Check if strong augmentations are active for the current epoch
@@ -223,12 +237,12 @@ class CustomDataset(Dataset):
                         augs.append(RandomZoomOut(side_range=(1.0, 4.0), p=self.cfg_augs.zoom_out_p))
 
             return A.Compose(
-                augs + resize,
+                augs + resize + normalize_and_tensor,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
         else:  # val, test, bench modes
             return A.Compose(
-                resize,
+                resize + normalize_and_tensor,
                 bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"]),
             )
 
@@ -236,12 +250,6 @@ class CustomDataset(Dataset):
         image_path = Path(self.split.iloc[idx].values[0])
         mosaic_applied = False
 
-        mosaic_active = (
-            "Mosaic" in self.aug_policy_ops
-            and self.aug_policy_epochs[0] <= self.epoch < self.aug_policy_epochs[2]
-        )
-
-        # Check if Mosaic is an active op in the policy for the current epoch
         mosaic_active = (
             "Mosaic" in self.aug_policy_ops
             and self.aug_policy_epochs[0] <= self.epoch < self.aug_policy_epochs[2]
@@ -260,6 +268,17 @@ class CustomDataset(Dataset):
             bboxes = targets[:, 1:5].tolist() if targets.shape[0] > 0 else []
             class_labels = targets[:, 0].tolist() if targets.shape[0] > 0 else []
 
+        # robust filtering
+        if bboxes:
+            bboxes_np = np.array(bboxes, dtype=np.float32)
+            labels_np = np.array(class_labels, dtype=np.int64)
+
+            # Ensure that x_max > x_min and y_max > y_min. This is the crucial fix.
+            keep = (bboxes_np[:, 2] > bboxes_np[:, 0]) & (bboxes_np[:, 3] > bboxes_np[:, 1])
+            
+            bboxes = bboxes_np[keep].tolist()
+            class_labels = labels_np[keep].tolist()
+
         # Get the appropriate transform pipeline
         transform = self._get_transform(mosaic_applied=mosaic_applied)
         
@@ -275,11 +294,13 @@ class CustomDataset(Dataset):
         )
         labels = torch.tensor(transformed["class_labels"], dtype=torch.int64)
 
+        # This secondary check is good practice but the primary fix is above
         valid_boxes_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
         boxes, labels = boxes[valid_boxes_mask], labels[valid_boxes_mask]
         areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
         if self.debug_img_processing and idx <= self.cases_to_debug:
+            # Note: For debugging, image is now a tensor. We adjust _debug_image accordingly.
             self._debug_image(idx, image, boxes, labels, image_path)
 
         boxes = abs_xyxy_to_norm_xywh(boxes.numpy(), image.shape[1], image.shape[2])
@@ -451,9 +472,7 @@ class Loader:
             img_paths.append(item[4])
 
         images = torch.stack(images, dim=0)
-
-        # Apply normalization here for validation
-        images = self.normalize_transform(image=images.permute(0, 2, 3, 1).numpy())["image"]
+        
         return images, targets, img_paths
 
     def val_collate_fn(self, batch) -> Tuple:
@@ -652,6 +671,6 @@ class Loader:
                 images = F.interpolate(images, size=sz, mode='bilinear', align_corners=False)
 
         # Apply normalization as the final step
-        images = self.normalize_transform(image=images.permute(0, 2, 3, 1).numpy())["image"]
+        #images = self.normalize_transform(image=images.permute(0, 2, 3, 1).numpy())["image"]
 
         return images, targets, img_paths
